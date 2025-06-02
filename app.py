@@ -196,6 +196,9 @@ def get_existing_peer_ips(wg_if):
 @app.route('/', methods=['GET', 'POST'])
 def index():
     interfaces = get_wg_interfaces()
+    # 获取当前选择的接口
+    selected_interface = request.args.get('interface', interfaces[0] if interfaces else None)
+    
     if request.method == 'POST':
         name = request.form['name']
         wg_if = request.form['interface']
@@ -303,9 +306,17 @@ PersistentKeepalive = 25
         flash(f"Client config generated and saved: wg{name}.conf", "success")
         return redirect(url_for('index'))
 
-    # 获取客户端数据并添加状态信息
+    # 获取客户端数据并添加状态信息，按接口过滤
     conn = sqlite3.connect(DB_PATH)
-    client_records = conn.execute('SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC').fetchall()
+    
+    # 如果指定了接口，只获取该接口的客户端
+    if selected_interface:
+        client_records = conn.execute('SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
+                                     (selected_interface,)).fetchall()
+    else:
+        # 否则获取所有客户端
+        client_records = conn.execute('SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC').fetchall()
+    
     conn.close()
     
     # 增强客户端数据
@@ -328,19 +339,19 @@ PersistentKeepalive = 25
             "active": status["active"]
         })
     
-    # 修改排序逻辑，将未连接的客户端排在最后
-    # 将这段代码替换现有的排序行：
-    # clients_with_status.sort(key=lambda x: x["last_handshake_timestamp"], reverse=True)
+    # 修改排序逻辑，确保以正确顺序显示客户端（活跃 > 暂停 > 未连接）
 
-    # 先将客户端分为两组：曾经连接过的和从未连接过的
-    connected_clients = [c for c in clients_with_status if c["last_handshake_timestamp"] > 0]
-    never_connected_clients = [c for c in clients_with_status if c["last_handshake_timestamp"] <= 0]
+    # 将客户端分为三组：活跃、暂停和未连接
+    active_clients = [c for c in clients_with_status if c["last_handshake_timestamp"] > 0]
+    paused_clients = [c for c in clients_with_status if c.get("status") == "paused"]
+    inactive_clients = [c for c in clients_with_status 
+                       if c["last_handshake_timestamp"] <= 0 and c.get("status") != "paused"]
 
-    # 对曾经连接过的客户端按最后握手时间戳排序（降序）
-    connected_clients.sort(key=lambda x: x["last_handshake_timestamp"], reverse=True)
+    # 对活跃客户端按最后握手时间戳排序（降序）
+    active_clients.sort(key=lambda x: x["last_handshake_timestamp"], reverse=True)
 
-    # 合并两个列表，未连接的排在最后
-    clients_with_status = connected_clients + never_connected_clients
+    # 合并三个列表，活跃的在前，暂停的在中间，未连接的在最后
+    clients_with_status = active_clients + paused_clients + inactive_clients
     
     used_ips = []
     endpoint_options = []
@@ -357,7 +368,8 @@ PersistentKeepalive = 25
             endpoint_options = []
     return render_template('index.html', interfaces=interfaces, clients=clients_with_status, 
                           files=os.listdir(CLIENT_OUTPUT_DIR), used_ips=used_ips, 
-                          endpoint_options=endpoint_options)
+                          endpoint_options=endpoint_options,
+                          selected_interface=selected_interface)  # 传递选定接口到模板
 
 
 @app.route('/download/<filename>')
@@ -435,29 +447,21 @@ def rename_client(old_name):
 # 在app.py中添加获取客户端状态的函数
 def get_client_status(interface, pubkey):
     try:
+        # 运行 dump 命令
         cmd = ["wg", "show", interface, "dump"]
         output = subprocess.check_output(cmd).decode().strip()
         
-        print(f"查找公钥: {pubkey}")
-        all_pubkeys = []
-        
-        # 跳过第一行（接口信息）
         lines = output.splitlines()
-        if not lines:
-            return {"endpoint": "未连接", "tx": "0 B", "rx": "0 B", "last_seen": "从未连接", "active": False}
         
         # 从第二行开始解析客户端信息
-        for line in lines[1:]:  # 关键修改：从索引1开始而不是0
+        for line in lines[1:]:
             parts = line.split('\t')
-            if len(parts) >= 7:  # 确保有足够的字段
-                # 第一个字段是客户端公钥
-                client_pubkey = parts[0]  # 注意：不是parts[1]
-                all_pubkeys.append(client_pubkey)
+            if len(parts) >= 7:
+                client_pubkey = parts[0]
                 
-                # 检查公钥是否匹配
+                # 检查是否匹配
                 if client_pubkey == pubkey:
                     endpoint = parts[2] if parts[2] and parts[2] != "(none)" else "未连接"
-                    allowed_ips = parts[3] if len(parts) > 3 else ""
                     latest_handshake = int(parts[4]) if len(parts) > 4 and parts[4] and parts[4] != "0" else 0
                     tx_bytes = int(parts[5]) if len(parts) > 5 and parts[5] else 0
                     rx_bytes = int(parts[6]) if len(parts) > 6 and parts[6] else 0
@@ -482,84 +486,59 @@ def get_client_status(interface, pubkey):
                     tx_str = format_bytes(tx_bytes)
                     rx_str = format_bytes(rx_bytes)
                     
-                    # 当找到匹配的客户端时的返回:
                     return {
                         "endpoint": endpoint,
                         "tx": tx_str,
                         "rx": rx_str,
                         "last_seen": last_seen,
-                        "last_handshake_timestamp": latest_handshake,  # 添加这一行
-                        "active": active
+                        "last_handshake_timestamp": latest_handshake,
+                        "active": active,
+                        "status": "active"
                     }
         
-        # 部分匹配检查
-        for line in lines[1:]:  # 同样从第二行开始
-            parts = line.split('\t')
-            if len(parts) >= 1:
-                client_pubkey = parts[0]
-                if pubkey.startswith(client_pubkey[:20]) or client_pubkey.startswith(pubkey[:20]):
-                    print(f"找到部分匹配: {client_pubkey}")
-                    endpoint = parts[2] if len(parts) > 2 and parts[2] and parts[2] != "(none)" else "未连接"
-                    latest_handshake = int(parts[4]) if len(parts) > 4 and parts[4] and parts[4] != "0" else 0
-                    tx_bytes = int(parts[5]) if len(parts) > 5 and parts[5] else 0
-                    rx_bytes = int(parts[6]) if len(parts) > 6 and parts[6] else 0
-                    
-                    # 格式化握手时间和其他信息
-                    if latest_handshake == 0:
-                        last_seen = "从未连接"
-                        active = False
-                    else:
-                        time_diff = time.time() - latest_handshake
-                        if time_diff < 60:
-                            last_seen = f"{int(time_diff)}秒前"
-                        elif time_diff < 3600:
-                            last_seen = f"{int(time_diff/60)}分钟前"
-                        elif time_diff < 86400:
-                            last_seen = f"{int(time_diff/3600)}小时前"
-                        else:
-                            last_seen = f"{int(time_diff/86400)}天前"
-                        active = time_diff < 150
-                    
-                    tx_str = format_bytes(tx_bytes)
-                    rx_str = format_bytes(rx_bytes)
-                    
-                    # 当找到匹配的客户端时的返回:
-                    return {
-                        "endpoint": endpoint,
-                        "tx": tx_str,
-                        "rx": rx_str,
-                        "last_seen": last_seen,
-                        "last_handshake_timestamp": latest_handshake,  # 添加这一行
-                        "active": active
-                    }
+        # 如果没有找到匹配项，检查客户端是否存在于数据库中
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        client = c.execute('SELECT name FROM clients WHERE public_key = ?', (pubkey,)).fetchone()
+        conn.close()
         
-        print(f"WireGuard接口中所有公钥: {all_pubkeys}")
-        print(f"警告: 公钥 {pubkey} 在接口 {interface} 中未找到")
+        if client:
+            # 客户端存在于数据库但不在 WireGuard 输出中 - 可能被暂停
+            return {
+                "endpoint": "已暂停",
+                "tx": "0 B",
+                "rx": "0 B",
+                "last_seen": "已暂停",
+                "last_handshake_timestamp": 0,  # 暂停的客户端排在未连接的后面
+                "active": False,
+                "status": "paused"  # 添加状态标记
+            }
+        else:
+            # 客户端既不在 WireGuard 输出中也不在数据库中
+            return {
+                "endpoint": "未连接",
+                "tx": "0 B", 
+                "rx": "0 B",
+                "last_seen": "从未连接",
+                "last_handshake_timestamp": 0,
+                "active": False,
+                "status": "disconnected"
+            }
         
-        # 未找到匹配时的返回也需要添加:
-        return {
-            "endpoint": "未连接",
-            "tx": "0 B",
-            "rx": "0 B",
-            "last_seen": "从未连接",
-            "last_handshake_timestamp": 0,  # 添加这一行
-            "active": False
-        }
     except Exception as e:
         print(f"获取客户端状态出错: {e}")
         import traceback
         print(traceback.format_exc())
         
-        # 异常时的返回也需要添加:
         return {
             "endpoint": f"错误: {str(e)}",
             "tx": "N/A",
             "rx": "N/A",
             "last_seen": "未知",
-            "last_handshake_timestamp": 0,  # 添加这一行
-            "active": False
+            "last_handshake_timestamp": 0,
+            "active": False,
+            "status": "error"
         }
-
 def format_bytes(size):
     """将字节格式化为人类可读格式"""
     power = 2**10
@@ -625,6 +604,101 @@ def show_qr(name):
         return redirect(url_for('index'))
     
     return render_template('qr.html', name=name, qr_base64=client[0])
+
+@app.route('/sync', methods=['GET', 'POST'])
+def sync_wg_clients():
+    """同步 WireGuard 状态与数据库"""
+    interfaces = get_wg_interfaces()
+    updated = 0
+    added = 0
+    
+    try:
+        # 从WireGuard获取所有对等方信息
+        wg_peers = {}
+        for interface in interfaces:
+            try:
+                # 使用dump命令获取更完整的信息
+                dump_cmd = ["wg", "show", interface, "dump"]
+                dump_output = subprocess.check_output(dump_cmd).decode().strip()
+                print(f"接口 {interface} 输出:\n{dump_output}")
+                
+                lines = dump_output.splitlines()
+                # 跳过第一行（接口信息）
+                for line in lines[1:]:
+                    parts = line.split('\t')
+                    if len(parts) >= 4:
+                        peer_pubkey = parts[0]
+                        endpoint = parts[2] if parts[2] and parts[2] != "(none)" else None
+                        allowed_ips = parts[3] if len(parts) > 3 else None
+                        
+                        # 提取IP地址
+                        peer_ip = None
+                        if allowed_ips:
+                            for ip_cidr in allowed_ips.split(','):
+                                if '/' in ip_cidr:
+                                    peer_ip = ip_cidr.strip()
+                                    break
+                        
+                        wg_peers[peer_pubkey] = {
+                            "interface": interface,
+                            "ip": peer_ip,
+                            "endpoint": endpoint
+                        }
+                        print(f"发现对等方: {peer_pubkey[:15]}..., IP: {peer_ip}")
+            except Exception as e:
+                print(f"处理接口 {interface} 时出错: {e}")
+                continue
+        
+        # 从数据库获取所有客户端
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        db_clients = c.execute('SELECT id, name, interface, ip, public_key FROM clients').fetchall()
+        
+        # 更新现有客户端的信息
+        for client_id, name, db_interface, db_ip, pubkey in db_clients:
+            if pubkey in wg_peers:
+                peer_info = wg_peers[pubkey]
+                # 检查是否需要更新接口或IP
+                if db_interface != peer_info["interface"] or (peer_info["ip"] and db_ip != peer_info["ip"]):
+                    # 更新客户端信息
+                    new_ip = peer_info["ip"] if peer_info["ip"] else db_ip
+                    c.execute('UPDATE clients SET interface = ?, ip = ? WHERE id = ?', 
+                             (peer_info["interface"], new_ip, client_id))
+                    updated += 1
+                    print(f"更新客户端 {name} 的接口和IP")
+        
+        # 添加数据库中不存在的WireGuard对等方
+        for pubkey, peer_info in wg_peers.items():
+            # 检查这个公钥是否已经在数据库中
+            existing = c.execute('SELECT COUNT(*) FROM clients WHERE public_key = ?', (pubkey,)).fetchone()[0]
+            if existing == 0 and peer_info["ip"]:
+                # 为新的对等方创建一个唯一名称
+                base_name = f"wg_{pubkey[:6]}"
+                new_name = base_name
+                i = 1
+                while c.execute('SELECT COUNT(*) FROM clients WHERE name = ?', (new_name,)).fetchone()[0] > 0:
+                    new_name = f"{base_name}_{i}"
+                    i += 1
+                
+                # 添加到数据库
+                c.execute(
+                    'INSERT INTO clients (name, interface, ip, public_key) VALUES (?, ?, ?, ?)',
+                    (new_name, peer_info["interface"], peer_info["ip"], pubkey)
+                )
+                added += 1
+                print(f"添加新客户端 {new_name}")
+        
+        conn.commit()
+        conn.close()
+        
+        flash(f"同步完成! 更新了 {updated} 个客户端，添加了 {added} 个新发现的客户端。", "success")
+    except Exception as e:
+        import traceback
+        print(f"同步过程中出错: {e}")
+        print(traceback.format_exc())
+        flash(f"同步过程中出错: {str(e)}", "danger")
+    
+    return redirect(url_for('index'))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=True)
