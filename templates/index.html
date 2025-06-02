@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WireGuard Client Generator</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body class="container py-4">
+  <h1 class="mb-4">Generate WireGuard Client Config</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <form method="post">
+    <div class="mb-3">
+      <label for="name" class="form-label">Client Name</label>
+      <input type="text" class="form-control" name="name" id="name" required>
+    </div>
+
+    <div class="mb-3">
+      <label for="interface" class="form-label">WireGuard Interface</label>
+      <select class="form-select" name="interface" id="interface">
+        {% for iface in interfaces %}
+          <option value="{{ iface }}">{{ iface }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="mb-3">
+      <label for="allowed_ips" class="form-label">Allowed IPs (optional)</label>
+      <input type="text" class="form-control" name="allowed_ips" id="allowed_ips" placeholder="Example: 192.168.1.0/24">
+    </div>
+
+    <div class="mb-3">
+      <label for="ip_last_octet" class="form-label">Custom IP Last Octet (optional)</label>
+      <input type="number" class="form-control" name="ip_last_octet" id="ip_last_octet" placeholder="e.g. 7" min="2" max="254">
+    </div>
+
+    <div class="mb-3">
+      <label for="endpoint" class="form-label">Select Endpoint</label>
+      <select class="form-select" name="endpoint" id="endpoint" required>
+        {% for ep in endpoint_options %}
+          <option value="{{ ep }}">{{ ep }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Generate Config</button>
+  </form>
+
+  <hr>
+  <h2>Generated Configs</h2>
+  <ul>
+    {% for file in files %}
+      <li><a href="/download/{{ file }}">{{ file }}</a></li>
+    {% endfor %}
+  </ul>
+
+  <hr>
+  <h2>Clients</h2>
+  <ul class="nav nav-tabs mb-3" id="clientTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" id="status-tab" data-bs-toggle="tab" data-bs-target="#status" type="button" role="tab" aria-controls="status" aria-selected="true">状态</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="manage-tab" data-bs-toggle="tab" data-bs-target="#manage" type="button" role="tab" aria-controls="manage" aria-selected="false">管理</button>
+    </li>
+  </ul>
+
+  <div class="tab-content" id="clientTabsContent">
+    <!-- 状态标签页 -->
+    <div class="tab-pane fade show active" id="status" role="tabpanel" aria-labelledby="status-tab">
+      <table class="table table-striped">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>Endpoint IP</th>
+            <th>发送/接收</th>
+            <th>最后连接</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for client in clients %}
+            <tr {% if client.active %}class="table-success"{% endif %}>
+              <td>{{ client.name }}</td>
+              <td>{{ client.endpoint_ip }}</td>
+              <td>↑ {{ client.tx }} / ↓ {{ client.rx }}</td>
+              <td>{{ client.last_seen }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4" class="text-center">没有找到客户端</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- 管理标签页 -->
+    <div class="tab-pane fade" id="manage" role="tabpanel" aria-labelledby="manage-tab">
+      <table class="table table-striped">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>WG IP</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for client in clients %}
+            <tr>
+              <td>{{ client.name }}</td>
+              <td>{{ client.wg_ip }}</td>
+              <td>{{ client.created_at }}</td>
+              <td>
+                <div class="btn-group btn-group-sm" role="group">
+                  <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#renameModal{{ client.name }}">
+                    重命名
+                  </button>
+                  
+                  <form action="{{ url_for('toggle_client', name=client.name) }}" method="POST" style="display: inline;">
+                    {% if client.active %}
+                      <input type="hidden" name="action" value="pause">
+                      <button type="submit" class="btn btn-outline-warning">暂停</button>
+                    {% else %}
+                      <input type="hidden" name="action" value="resume">
+                      <button type="submit" class="btn btn-outline-success">恢复</button>
+                    {% endif %}
+                  </form>
+                  
+                  <a href="{{ url_for('show_qr', name=client.name) }}" class="btn btn-outline-secondary">
+                    显示二维码
+                  </a>
+                  
+                  <a href="{{ url_for('download', filename='wg' + client.name + '.conf') }}" class="btn btn-outline-info">
+                    下载配置
+                  </a>
+                  
+                  <form action="{{ url_for('delete_client', name=client.name) }}" method="POST" onsubmit="return confirm('确定要删除此客户端吗?');" style="display: inline;">
+                    <button type="submit" class="btn btn-outline-danger">删除</button>
+                  </form>
+                </div>
+                
+                <!-- 重命名模态框 -->
+                <div class="modal fade" id="renameModal{{ client.name }}" tabindex="-1" aria-hidden="true">
+                  <div class="modal-dialog">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <h5 class="modal-title">重命名客户端</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                      </div>
+                      <form action="{{ url_for('rename_client', old_name=client.name) }}" method="POST">
+                        <div class="modal-body">
+                          <div class="mb-3">
+                            <label for="new_name" class="form-label">新名称</label>
+                            <input type="text" class="form-control" id="new_name" name="new_name" required>
+                          </div>
+                        </div>
+                        <div class="modal-footer">
+                          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                          <button type="submit" class="btn btn-primary">保存</button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4" class="text-center">没有找到客户端</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</body>
+</html>

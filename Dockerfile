@@ -5,7 +5,6 @@ ARG https_proxy
 ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
-
 WORKDIR /app
 
 # Install necessary tools
@@ -17,9 +16,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-# Move HTML to templates folder
-RUN mkdir -p /app/templates && mv /app/index.html /app/templates/index.html
-
-EXPOSE 8080
+EXPOSE 8088
 
 CMD ["python", "app.py"]
