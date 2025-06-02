@@ -1,6 +1,7 @@
 # wg_web_manager/app.py
 
 import sqlite3
+import re
 
 DB_PATH = "clients.db"
 
@@ -24,9 +25,12 @@ def init_db():
 # init_db()  # Moved to app initialization context
 
 def populate_existing_clients():
+    # First populate from WireGuard interfaces
     interfaces = get_wg_interfaces()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
+    # Step 1: Process WireGuard interfaces
     for wg_if in interfaces:
         try:
             output = subprocess.check_output(["wg", "show", wg_if, "allowed-ips"]).decode().strip()
@@ -44,8 +48,83 @@ def populate_existing_clients():
                         i += 1
         except Exception as e:
             print(f"[WARN] Could not parse peers for {wg_if}: {e}")
+    
+    # Step 2: Scan the CLIENT_OUTPUT_DIR for config files
+    print(f"[INFO] Scanning client config directory: {CLIENT_OUTPUT_DIR}")
+    if os.path.exists(CLIENT_OUTPUT_DIR):
+        for filename in os.listdir(CLIENT_OUTPUT_DIR):
+            if filename.startswith('wg') and filename.endswith('.conf'):
+                # Extract client name from filename (remove 'wg' prefix and '.conf' suffix)
+                client_name = filename[2:-5]
+                
+                # Check if this client exists in the database
+                existing = c.execute("SELECT COUNT(*) FROM clients WHERE name = ?", (client_name,)).fetchone()[0]
+                
+                if existing == 0:
+                    print(f"[INFO] Found new client config file: {filename}")
+                    conf_path = os.path.join(CLIENT_OUTPUT_DIR, filename)
+                    
+                    try:
+                        # Read the config file
+                        with open(conf_path, 'r') as f:
+                            config_content = f.read()
+                        
+                        # Extract needed information from config
+                        # Get IP address
+                        ip_match = re.search(r'Address\s*=\s*([0-9\.]+)/\d+', config_content)
+                        client_ip = ip_match.group(1) if ip_match else "unknown"
+                        
+                        # Get private key to derive public key
+                        privkey_match = re.search(r'PrivateKey\s*=\s*([a-zA-Z0-9+/=]+)', config_content)
+                        pubkey = "imported_config"
+                        
+                        if privkey_match:
+                            try:
+                                privkey = privkey_match.group(1)
+                                # Derive public key from private key
+                                pubkey = subprocess.check_output(
+                                    ["bash", "-c", f"echo '{privkey}' | wg pubkey"]
+                                ).decode().strip()
+                            except:
+                                # If we can't get the public key, use a placeholder
+                                pass
+                        
+                        # Get server pubkey to identify interface
+                        server_pubkey_match = re.search(r'PublicKey\s*=\s*([a-zA-Z0-9+/=]+)', config_content)
+                        
+                        # Try to determine which interface this client belongs to
+                        wg_if = interfaces[0] if interfaces else "wg0"  # default
+                        if server_pubkey_match:
+                            server_pubkey = server_pubkey_match.group(1)
+                            for interface in interfaces:
+                                try:
+                                    if_pubkey = subprocess.check_output(
+                                        ["wg", "show", interface, "public-key"]
+                                    ).decode().strip()
+                                    if if_pubkey == server_pubkey:
+                                        wg_if = interface
+                                        break
+                                except:
+                                    continue
+                        
+                        # Generate QR code
+                        qr = qrcode.make(config_content)
+                        buffer = BytesIO()
+                        qr.save(buffer, format='PNG')
+                        qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        
+                        # Add to database
+                        c.execute(
+                            'INSERT INTO clients (name, interface, ip, public_key, qr_base64) VALUES (?, ?, ?, ?, ?)',
+                            (client_name, wg_if, client_ip, pubkey, qr_base64)
+                        )
+                        print(f"[INFO] Imported client {client_name} with IP {client_ip}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to import client {client_name}: {e}")
+    
     conn.commit()
     conn.close()
+    print("[INFO] Client population completed")
 
 # wg_web_manager/app.py
 
