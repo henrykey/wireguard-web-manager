@@ -21,7 +21,32 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+# init_db()  # Moved to app initialization context
+
+def populate_existing_clients():
+    interfaces = get_wg_interfaces()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    for wg_if in interfaces:
+        try:
+            output = subprocess.check_output(["wg", "show", wg_if, "allowed-ips"]).decode().strip()
+            i = 1
+            for line in output.splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    pubkey, ip = parts
+                    short_ip = ip.split('/')[0]
+                    existing = c.execute("SELECT COUNT(*) FROM clients WHERE public_key = ?", (pubkey,)).fetchone()[0]
+                    if existing == 0:
+                        name = f"user{i}"
+                        c.execute('INSERT INTO clients (name, interface, ip, public_key) VALUES (?, ?, ?, ?)',
+                                  (name, wg_if, short_ip, pubkey))
+                        i += 1
+        except Exception as e:
+            print(f"[WARN] Could not parse peers for {wg_if}: {e}")
+    conn.commit()
+    conn.close()
+
 # wg_web_manager/app.py
 
 from flask import Flask, render_template, request, send_file, redirect, url_for, flash
@@ -31,6 +56,10 @@ import tempfile
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # for flashing messages
+
+# Initialize database on startup
+with app.app_context():
+    init_db()
 
 WG_CONF_DIR = "/etc/wireguard"
 CLIENT_OUTPUT_DIR = "./clients"
@@ -48,6 +77,19 @@ def get_server_info(wg_if):
             f"ip -4 addr show dev {wg_if} | grep -oP '(?<=inet\s)\\d+(\\.\\d+){{3}}/\\d+'",
             shell=True
         ).decode().strip().split('/')[0]
+        try:
+            # Try to read endpoint from local config
+            conf_path = os.path.join(WG_CONF_DIR, f"{wg_if}.conf")
+            with open(conf_path, 'r') as f:
+                endpoints = []
+                for line in f:
+                    if line.strip().startswith("# endpoint:"):
+                        endpoint_line = line.strip().split(":", 1)[1].strip()
+                        endpoints.append(endpoint_line)
+                if endpoints:
+                    return pubkey, endpoints[0], endpoints  # default + all
+        except:
+            pass
         return pubkey, f"{ip}:{port}"
     except subprocess.CalledProcessError:
         return None, None
@@ -57,6 +99,20 @@ def generate_keys():
     pubkey = subprocess.check_output(["bash", "-c", f"echo '{privkey}' | wg pubkey"]).decode().strip()
     return privkey, pubkey
 
+# Get existing peer IPs for the given WireGuard interface
+def get_existing_peer_ips(wg_if):
+    try:
+        output = subprocess.check_output(["wg", "show", wg_if, "allowed-ips"]).decode().strip()
+        used_ips = []
+        for line in output.splitlines():
+            parts = line.strip().split()
+            if len(parts) == 2:
+                ip = parts[1].split('/')[0]
+                used_ips.append(ip)
+        return used_ips
+    except subprocess.CalledProcessError:
+        return []
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     interfaces = get_wg_interfaces()
@@ -65,14 +121,32 @@ def index():
         wg_if = request.form['interface']
         allowed_ips = request.form['allowed_ips']
 
-        server_pubkey, endpoint = get_server_info(wg_if)
-        if not server_pubkey:
+        result = get_server_info(wg_if)
+        if not result:
             flash(f"Cannot retrieve server info for interface {wg_if}.", "danger")
             return redirect(url_for('index'))
+        server_pubkey, endpoint, endpoint_options = result
 
         subnet = endpoint.split(':')[0].rsplit('.', 1)[0]  # e.g. 10.23.0
-        octet = subprocess.check_output(["shuf", "-i", "2-254", "-n", "1"]).decode().strip()
-        client_ip = f"{subnet}.{octet}/32"
+        ip_last_octet = request.form.get('ip_last_octet', '').strip()
+        used_ips = get_existing_peer_ips(wg_if)
+        client_ip = None
+
+        if ip_last_octet and ip_last_octet.isdigit():
+            candidate = f"{subnet}.{ip_last_octet}"
+            if candidate in used_ips:
+                flash(f"IP {candidate} is already used.", "danger")
+                return redirect(url_for('index'))
+            client_ip = f"{candidate}/32"
+        else:
+            for i in range(2, 255):
+                candidate = f"{subnet}.{i}"
+                if candidate not in used_ips:
+                    client_ip = f"{candidate}/32"
+                    break
+            if not client_ip:
+                flash("No available IP addresses in subnet.", "danger")
+                return redirect(url_for('index'))
 
         privkey, pubkey = generate_keys()
         if not allowed_ips:
@@ -111,6 +185,8 @@ PersistentKeepalive = 25
         # Apply to running WG instance and save to server config
         subprocess.call(["wg", "set", wg_if, "peer", pubkey, "allowed-ips", client_ip])
         with open(os.path.join(WG_CONF_DIR, f"{wg_if}.conf"), 'a') as f:
+            if not any("# endpoint:" in line for line in open(os.path.join(WG_CONF_DIR, f"{wg_if}.conf"))):
+                f.write(f"\n# endpoint: {endpoint}\n")
             f.write(f"\n# Client {name}\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {client_ip}\n")
 
         flash(f"Client config generated and saved: wg{name}.conf", "success")
@@ -119,7 +195,20 @@ PersistentKeepalive = 25
     conn = sqlite3.connect(DB_PATH)
     clients = conn.execute('SELECT name, ip, interface, created_at, qr_base64 FROM clients ORDER BY id DESC').fetchall()
     conn.close()
-    return render_template('index.html', interfaces=interfaces, clients=clients, files=os.listdir(CLIENT_OUTPUT_DIR))
+    used_ips = []
+    endpoint_options = []
+    if interfaces:
+        try:
+            used_ips = get_existing_peer_ips(interfaces[0])
+            server_info = get_server_info(interfaces[0])
+            if server_info and len(server_info) == 3:
+                _, _, endpoint_options = server_info
+            else:
+                endpoint_options = []
+        except Exception:
+            used_ips = []
+            endpoint_options = []
+    return render_template('index.html', interfaces=interfaces, clients=clients, files=os.listdir(CLIENT_OUTPUT_DIR), used_ips=used_ips, endpoint_options=endpoint_options)
 
 
 @app.route('/download/<filename>')
@@ -198,6 +287,19 @@ def rename_client(old_name):
 
     flash(f'Client renamed from {old_name} to {new_name}.', 'success')
     return redirect(url_for('index'))
+
+
+
+# @app.before_first_request
+# def init():
+#     populate_existing_clients()
+
+@app.before_request
+def before_request_func():
+    if not getattr(app, 'initialized', False):
+        init_db()  # Add this line to create the table first
+        populate_existing_clients()
+        app.initialized = True
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=True)

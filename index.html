@@ -36,6 +36,20 @@
       <input type="text" class="form-control" name="allowed_ips" id="allowed_ips" placeholder="Example: 192.168.1.0/24">
     </div>
 
+    <div class="mb-3">
+      <label for="ip_last_octet" class="form-label">Custom IP Last Octet (optional)</label>
+      <input type="number" class="form-control" name="ip_last_octet" id="ip_last_octet" placeholder="e.g. 7" min="2" max="254">
+    </div>
+
+    <div class="mb-3">
+      <label for="endpoint" class="form-label">Select Endpoint</label>
+      <select class="form-select" name="endpoint" id="endpoint" required>
+        {% for ep in endpoint_options %}
+          <option value="{{ ep }}">{{ ep }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
     <button type="submit" class="btn btn-primary">Generate Config</button>
   </form>
 
