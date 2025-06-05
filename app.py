@@ -616,9 +616,6 @@ def get_client_status(interface, pubkey):
         cmd = ["wg", "show", interface]
         output = subprocess.check_output(cmd).decode().strip()
         
-        # 打印完整输出便于调试
-        # print(output)
-        
         # 逐行解析并构建peer信息
         lines = output.splitlines()
         current_peer = None
@@ -1047,7 +1044,7 @@ def get_all_peers_status(interface):
             current_peer = peer_line.split(":", 1)[1].strip()
             print(f"处理对等方 {i+1}: {current_peer[:8]}...")
             
-            # 初始化对等方信息 - 关键是这里要确保标记为active=True
+            # 初始化对等方信息
             peers[current_peer] = {
                 "endpoint": "未连接",
                 "allowed_ips": "无",
@@ -1059,8 +1056,8 @@ def get_all_peers_status(interface):
                 "transfer_tx": "0 B",
                 "rx": "0 B",
                 "tx": "0 B",
-                "active": True,  # 默认设为活跃
-                "status": "active"  # 默认设为活跃
+                "active": False,  # 默认为非活跃
+                "status": "disconnected"  # 默认为断开连接
             }
             
             # 处理对等方的属性行
@@ -1077,22 +1074,23 @@ def get_all_peers_status(interface):
                     if key == "endpoint":
                         peers[current_peer]["endpoint"] = value
                     elif key == "allowed ips":
-                        # 保存完整的allowed ips字符串，不做特殊处理
+                        # 保存完整的allowed ips字符串
                         peers[current_peer]["allowed_ips"] = value
-                        # 如果值为(none)，则标记为非活跃
-                        if value == "(none)":
-                            peers[current_peer]["active"] = False
-                            peers[current_peer]["status"] = "disconnected"
                     elif key == "latest handshake":
                         peers[current_peer]["latest_handshake"] = value
                         peers[current_peer]["last_seen"] = value
                         handshake_timestamp = parse_handshake_time(value)
                         peers[current_peer]["handshake_timestamp"] = handshake_timestamp
                         peers[current_peer]["last_handshake_timestamp"] = handshake_timestamp
-                        # 只有在从未握手的情况下才标记为非活跃
-                        if handshake_timestamp == 0:
-                            peers[current_peer]["active"] = False
-                            peers[current_peer]["status"] = "disconnected"
+                        
+                        # 如果最近150秒内有握手，则标记为活跃
+                        now = time.time()
+                        if handshake_timestamp > 0 and (now - handshake_timestamp) <= 150:
+                            peers[current_peer]["active"] = True
+                            peers[current_peer]["status"] = "active"
+                            print(f"  活跃状态: 是 (最近握手: {int(now - handshake_timestamp)}秒前)")
+                        else:
+                            print(f"  活跃状态: 否 (最近握手: {int(now - handshake_timestamp) if handshake_timestamp > 0 else '从未'}秒前)")
                     elif key == "transfer":
                         # 解析传输信息
                         parts = value.split(",")
@@ -1107,9 +1105,9 @@ def get_all_peers_status(interface):
                             peers[current_peer]["tx"] = tx_value
         
         print(f"接口 {interface} 上成功解析 {len(peers)} 个对等方")
-        # 打印找到的所有peer的公钥前缀和它们的活跃状态
-        for k, v in peers.items():
-            print(f"对等方 {k[:8]}... - 活跃: {v['active']}, 允许的IP: {v['allowed_ips']}")
+        # 打印活跃客户端的数量
+        active_count = sum(1 for v in peers.values() if v["active"])
+        print(f"活跃客户端: {active_count}/{len(peers)} (活跃定义: 最近150秒内有握手)")
         return peers
         
     except Exception as e:
