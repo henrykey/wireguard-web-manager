@@ -11,9 +11,15 @@ from io import BytesIO
 import base64
 import time
 
-DB_PATH = "clients.db"
+# 修复路径问题，使用绝对路径
+DB_PATH = "/app/clients/clients.db"
+CLIENT_OUTPUT_DIR = "/app/clients"
+
+# 确保客户端输出目录存在
+os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
 
 def init_db():
+    """初始化数据库，创建必要的表和列"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
@@ -24,15 +30,24 @@ def init_db():
             ip TEXT,
             public_key TEXT,
             qr_base64 TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'active'
         )
     ''')
+    
+    # 检查 status 列是否存在，不存在则添加
+    try:
+        c.execute("SELECT status FROM clients LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'active'")
+        print("已添加 status 列到 clients 表")
+    
     conn.commit()
     conn.close()
-
-# init_db()  # Moved to app initialization context
+    print("数据库初始化完成")
 
 def populate_existing_clients():
+    """从WireGuard配置和现有客户端配置文件填充数据库"""
     # First populate from WireGuard interfaces
     interfaces = get_wg_interfaces()
     conn = sqlite3.connect(DB_PATH)
@@ -51,8 +66,8 @@ def populate_existing_clients():
                     existing = c.execute("SELECT COUNT(*) FROM clients WHERE public_key = ?", (pubkey,)).fetchone()[0]
                     if existing == 0:
                         name = f"user{i}"
-                        c.execute('INSERT INTO clients (name, interface, ip, public_key) VALUES (?, ?, ?, ?)',
-                                  (name, wg_if, short_ip, pubkey))
+                        c.execute('INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
+                                  (name, wg_if, short_ip, pubkey, 'active'))
                         i += 1
         except Exception as e:
             print(f"[WARN] Could not parse peers for {wg_if}: {e}")
@@ -123,8 +138,8 @@ def populate_existing_clients():
                         
                         # Add to database
                         c.execute(
-                            'INSERT INTO clients (name, interface, ip, public_key, qr_base64) VALUES (?, ?, ?, ?, ?)',
-                            (client_name, wg_if, client_ip, pubkey, qr_base64)
+                            'INSERT INTO clients (name, interface, ip, public_key, qr_base64, status) VALUES (?, ?, ?, ?, ?, ?)',
+                            (client_name, wg_if, client_ip, pubkey, qr_base64, 'active')
                         )
                         print(f"[INFO] Imported client {client_name} with IP {client_ip}")
                     except Exception as e:
@@ -137,13 +152,11 @@ def populate_existing_clients():
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # for flashing messages
 
-# Initialize database on startup
-with app.app_context():
-    init_db()
-
+# 设置WireGuard配置目录
 WG_CONF_DIR = "/etc/wireguard"
-CLIENT_OUTPUT_DIR = "./clients"
-os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
+
+# 移除app.app_context()里的初始化，统一在before_request中处理
+# 避免重复初始化问题
 
 def get_wg_interfaces():
     output = subprocess.check_output(["wg", "show", "interfaces"]).decode().strip()
@@ -192,6 +205,20 @@ def get_existing_peer_ips(wg_if):
         return used_ips
     except subprocess.CalledProcessError:
         return []
+
+@app.before_request
+def before_request_func():
+    """确保应用只初始化一次"""
+    if not getattr(app, 'initialized', False):
+        # 确保目录存在
+        os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
+        # 初始化数据库
+        init_db()  
+        # 填充现有客户端
+        populate_existing_clients()
+        # 标记应用已初始化
+        app.initialized = True
+        print("应用初始化完成")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -288,11 +315,11 @@ PersistentKeepalive = 25
             buffer = BytesIO()
             qr.save(buffer, format='PNG')
             qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            # Save to SQLite
+            # Save to SQLite with status='active'
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute('INSERT INTO clients (name, interface, ip, public_key, qr_base64) VALUES (?, ?, ?, ?, ?)',
-                      (name, wg_if, client_ip, pubkey, qr_base64))
+            c.execute('INSERT INTO clients (name, interface, ip, public_key, qr_base64, status) VALUES (?, ?, ?, ?, ?, ?)',
+                      (name, wg_if, client_ip, pubkey, qr_base64, 'active'))
             conn.commit()
             conn.close()
 
@@ -311,19 +338,146 @@ PersistentKeepalive = 25
     
     # 如果指定了接口，只获取该接口的客户端
     if selected_interface:
-        client_records = conn.execute('SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
-                                     (selected_interface,)).fetchall()
+        # 尝试获取status字段，如果不存在就不查询它
+        try:
+            client_records = conn.execute(
+                'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients WHERE interface = ? ORDER BY id DESC', 
+                (selected_interface,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            client_records = conn.execute(
+                'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
+                (selected_interface,)
+            ).fetchall()
     else:
         # 否则获取所有客户端
-        client_records = conn.execute('SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC').fetchall()
+        try:
+            client_records = conn.execute(
+                'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients ORDER BY id DESC'
+            ).fetchall()
+        except sqlite3.OperationalError:
+            client_records = conn.execute(
+                'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC'
+            ).fetchall()
     
     conn.close()
+    
+    # 优化：预先获取所有接口的所有对等方状态，避免重复调用wg命令
+    all_peers_status = {}
+    missing_peers = []  # 存储WireGuard中有但数据库中没有的对等方
+    
+    for interface in interfaces:
+        peers_in_interface = get_all_peers_status(interface)
+        all_peers_status[interface] = peers_in_interface
+        
+        # 检查是否有在WireGuard中但不在数据库中的对等方
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        for pubkey, peer_info in peers_in_interface.items():
+            exists = c.execute('SELECT COUNT(*) FROM clients WHERE public_key = ?', (pubkey,)).fetchone()[0]
+            if exists == 0:
+                # 找到了WireGuard中有但数据库中没有的对等方
+                # 提取IP地址
+                allowed_ips = peer_info.get("allowed_ips", "无")
+                ip = "未知"
+                if allowed_ips != "无" and allowed_ips != "(none)":
+                    ip_parts = allowed_ips.split(",")[0].strip()  # 取第一个IP/网段
+                    if "/" in ip_parts:
+                        ip = ip_parts  # 包含CIDR
+                
+                missing_peers.append({
+                    "pubkey": pubkey,
+                    "interface": interface,
+                    "ip": ip,
+                    "allowed_ips": allowed_ips
+                })
+        conn.close()
+    
+    # 如果发现了缺失的对等方，自动添加到数据库
+    if missing_peers:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        for peer in missing_peers:
+            # 为新对等方创建一个唯一名称
+            base_name = f"auto_{peer['pubkey'][:6]}"
+            new_name = base_name
+            i = 1
+            while c.execute('SELECT COUNT(*) FROM clients WHERE name = ?', (new_name,)).fetchone()[0] > 0:
+                new_name = f"{base_name}_{i}"
+                i += 1
+            
+            # 添加到数据库
+            c.execute(
+                'INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
+                (new_name, peer["interface"], peer["ip"], peer["pubkey"], 'active')
+            )
+            print(f"自动添加WireGuard对等方到数据库: {new_name}, 公钥: {peer['pubkey'][:8]}...")
+        
+        conn.commit()
+        conn.close()
+        flash(f"已自动添加 {len(missing_peers)} 个在WireGuard中发现但数据库中不存在的客户端", "success")
+        
+        # 重新加载客户端列表以包含新添加的客户端
+        conn = sqlite3.connect(DB_PATH)
+        if selected_interface:
+            try:
+                client_records = conn.execute(
+                    'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients WHERE interface = ? ORDER BY id DESC', 
+                    (selected_interface,)
+                ).fetchall()
+            except sqlite3.OperationalError:
+                client_records = conn.execute(
+                    'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
+                    (selected_interface,)
+                ).fetchall()
+        else:
+            # 否则获取所有客户端
+            try:
+                client_records = conn.execute(
+                    'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients ORDER BY id DESC'
+                ).fetchall()
+            except sqlite3.OperationalError:
+                client_records = conn.execute(
+                    'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC'
+                ).fetchall()
+        conn.close()
     
     # 增强客户端数据
     clients_with_status = []
     for client in client_records:
-        name, ip, interface, created_at, qr_base64, pubkey = client
-        status = get_client_status(interface, pubkey)
+        # 检查是否有status字段
+        if len(client) >= 7:
+            name, ip, interface, created_at, qr_base64, pubkey, db_status = client
+        else:
+            name, ip, interface, created_at, qr_base64, pubkey = client
+            db_status = 'active'  # 默认状态
+        
+        # 添加调试输出
+        print(f"处理客户端: {name}, 公钥: {pubkey[:8] if len(pubkey) >= 8 else pubkey}...")
+        
+        # 从缓存中获取状态信息，而不是每次都调用命令
+        if interface in all_peers_status and pubkey in all_peers_status[interface]:
+            status = all_peers_status[interface][pubkey]
+        else:
+            # 如果在缓存中找不到，则使用默认的断开连接状态
+            status = {
+                "endpoint": "未连接",
+                "tx": "0 B",
+                "rx": "0 B",
+                "last_seen": "从未连接",
+                "last_handshake_timestamp": 0,
+                "active": False,
+                "status": "disconnected",
+                "allowed_ips": "无"
+            }
+        
+        # 如果数据库中是暂停状态，覆盖状态信息
+        if db_status == 'paused':
+            status['status'] = 'paused'
+            status['active'] = False
+            status['endpoint'] = '已暂停'
+            status['last_seen'] = '已暂停'
+        
         clients_with_status.append({
             "name": name,
             "wg_ip": ip.split('/')[0] if '/' in ip else ip,
@@ -335,22 +489,29 @@ PersistentKeepalive = 25
             "tx": status["tx"],
             "rx": status["rx"],
             "last_seen": status["last_seen"],
-            "last_handshake_timestamp": status.get("last_handshake_timestamp", 0),  # 保存原始时间戳用于排序
-            "active": status["active"]
+            "last_handshake_timestamp": status.get("last_handshake_timestamp", 0),
+            "active": status["active"],
+            "status": status.get("status", "disconnected"),
+            "allowed_ips": status.get("allowed_ips", "无")
         })
     
-    # 修改排序逻辑，确保以正确顺序显示客户端（活跃 > 暂停 > 未连接）
+    # 添加调试输出
+    print(f"总客户端数: {len(clients_with_status)}")
+    active_count = sum(1 for c in clients_with_status if c.get("active", False))
+    paused_count = sum(1 for c in clients_with_status if c.get("status") == "paused")
+    disconnected_count = len(clients_with_status) - active_count - paused_count
+    print(f"活跃客户端: {active_count}, 暂停客户端: {paused_count}, 未连接客户端: {disconnected_count}")
 
-    # 将客户端分为三组：活跃、暂停和未连接
-    active_clients = [c for c in clients_with_status if c["last_handshake_timestamp"] > 0]
+    # 根据状态分组客户端
+    active_clients = [c for c in clients_with_status if c["active"]]
     paused_clients = [c for c in clients_with_status if c.get("status") == "paused"]
     inactive_clients = [c for c in clients_with_status 
-                       if c["last_handshake_timestamp"] <= 0 and c.get("status") != "paused"]
+                       if not c["active"] and c.get("status") != "paused"]
 
-    # 对活跃客户端按最后握手时间戳排序（降序）
-    active_clients.sort(key=lambda x: x["last_handshake_timestamp"], reverse=True)
+    # 按照最后握手时间排序活跃客户端（最近的在前）
+    active_clients.sort(key=lambda x: x.get("last_handshake_timestamp", 0), reverse=True)
 
-    # 合并三个列表，活跃的在前，暂停的在中间，未连接的在最后
+    # 合并列表：活跃 > 暂停 > 未连接
     clients_with_status = active_clients + paused_clients + inactive_clients
     
     used_ips = []
@@ -444,92 +605,138 @@ def rename_client(old_name):
     flash(f'Client renamed from {old_name} to {new_name}.', 'success')
     return redirect(url_for('index'))
 
-# 在app.py中添加获取客户端状态的函数
+# 获取客户端状态的函数
 def get_client_status(interface, pubkey):
+    """获取客户端的连接状态，直接从WireGuard读取标准输出"""
     try:
-        # 运行 dump 命令
-        cmd = ["wg", "show", interface, "dump"]
+        # 调试输出
+        print(f"查找公钥 '{pubkey[:8]}...' 的状态")
+        
+        # 使用标准wg命令获取信息
+        cmd = ["wg", "show", interface]
         output = subprocess.check_output(cmd).decode().strip()
         
+        # 打印完整输出便于调试
+        # print(output)
+        
+        # 逐行解析并构建peer信息
         lines = output.splitlines()
+        current_peer = None
+        peers = {}
         
-        # 从第二行开始解析客户端信息
-        for line in lines[1:]:
-            parts = line.split('\t')
-            if len(parts) >= 7:
-                client_pubkey = parts[0]
+        for line in lines:
+            line = line.strip()
+            
+            if not line:  # 跳过空行
+                continue
                 
-                # 检查是否匹配
-                if client_pubkey == pubkey:
-                    endpoint = parts[2] if parts[2] and parts[2] != "(none)" else "未连接"
-                    latest_handshake = int(parts[4]) if len(parts) > 4 and parts[4] and parts[4] != "0" else 0
-                    tx_bytes = int(parts[5]) if len(parts) > 5 and parts[5] else 0
-                    rx_bytes = int(parts[6]) if len(parts) > 6 and parts[6] else 0
+            if line.startswith("interface:"):
+                # 接口信息行，跳过
+                continue
+                
+            if line.startswith("peer:"):
+                # 新的peer开始
+                current_peer = line.split(":", 1)[1].strip()
+                peers[current_peer] = {
+                    "endpoint": "未连接",
+                    "allowed_ips": "无",
+                    "latest_handshake": "从未连接",
+                    "handshake_timestamp": 0,
+                    "transfer_rx": "0 B",
+                    "transfer_tx": "0 B",
+                    "active": False
+                }
+                print(f"检查对等方: {current_peer[:8]}...")
+                
+            elif current_peer and line.startswith("  "):
+                # peer的属性行
+                if ":" in line:
+                    key, value = line.strip().split(":", 1)
+                    key = key.strip()
+                    value = value.strip()
                     
-                    # 格式化握手时间
-                    if latest_handshake == 0:
-                        last_seen = "从未连接"
-                        active = False
-                    else:
-                        time_diff = time.time() - latest_handshake
-                        if time_diff < 60:
-                            last_seen = f"{int(time_diff)}秒前"
-                        elif time_diff < 3600:
-                            last_seen = f"{int(time_diff/60)}分钟前"
-                        elif time_diff < 86400:
-                            last_seen = f"{int(time_diff/3600)}小时前"
-                        else:
-                            last_seen = f"{int(time_diff/86400)}天前"
-                        active = time_diff < 150
-                    
-                    # 格式化传输数量
-                    tx_str = format_bytes(tx_bytes)
-                    rx_str = format_bytes(rx_bytes)
-                    
-                    return {
-                        "endpoint": endpoint,
-                        "tx": tx_str,
-                        "rx": rx_str,
-                        "last_seen": last_seen,
-                        "last_handshake_timestamp": latest_handshake,
-                        "active": active,
-                        "status": "active"
-                    }
+                    if key == "endpoint":
+                        peers[current_peer]["endpoint"] = value
+                    elif key == "allowed ips":
+                        peers[current_peer]["allowed_ips"] = value
+                    elif key == "latest handshake":
+                        peers[current_peer]["latest_handshake"] = value
+                        peers[current_peer]["handshake_timestamp"] = parse_handshake_time(value)
+                        # 如果有握手时间，则标记为活跃
+                        peers[current_peer]["active"] = peers[current_peer]["handshake_timestamp"] > 0
+                    elif key == "transfer":
+                        # 解析传输信息
+                        parts = value.split(",")
+                        if len(parts) >= 2:
+                            rx_part = parts[0].strip()
+                            tx_part = parts[1].strip()
+                            peers[current_peer]["transfer_rx"] = rx_part.split(" received")[0] if " received" in rx_part else rx_part
+                            peers[current_peer]["transfer_tx"] = tx_part.split(" sent")[0] if " sent" in tx_part else tx_part
         
-        # 如果没有找到匹配项，检查客户端是否存在于数据库中
+        # 检查目标公钥是否在peers中
+        if pubkey in peers:
+            peer_info = peers[pubkey]
+            print(f"找到匹配公钥: {pubkey[:8]}...")
+            print(f"  端点: {peer_info['endpoint']}")
+            print(f"  允许的IP: {peer_info['allowed_ips']}")
+            print(f"  最近握手: {peer_info['latest_handshake']}")
+            print(f"  传输: 收到 {peer_info['transfer_rx']}, 发送 {peer_info['transfer_tx']}")
+            print(f"  活跃状态: {'是' if peer_info['active'] else '否'}")
+            
+            return {
+                "endpoint": peer_info["endpoint"],
+                "tx": peer_info["transfer_tx"],
+                "rx": peer_info["transfer_rx"],
+                "last_seen": peer_info["latest_handshake"],
+                "last_handshake_timestamp": peer_info["handshake_timestamp"],
+                "active": peer_info["active"],
+                "status": "active" if peer_info["active"] else "disconnected",
+                "allowed_ips": peer_info["allowed_ips"]
+            }
+        
+        # 如果没有找到匹配的对等方
+        print(f"未找到匹配的公钥: {pubkey[:8]}...")
+        all_peers = list(peers.keys())
+        print(f"当前可用的对等方: {[p[:8]+'...' for p in all_peers]}")
+        
+        # 检查数据库中是否标记为暂停
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        client = c.execute('SELECT name FROM clients WHERE public_key = ?', (pubkey,)).fetchone()
-        conn.close()
         
-        if client:
-            # 客户端存在于数据库但不在 WireGuard 输出中 - 可能被暂停
-            return {
-                "endpoint": "已暂停",
-                "tx": "0 B",
-                "rx": "0 B",
-                "last_seen": "已暂停",
-                "last_handshake_timestamp": 0,  # 暂停的客户端排在未连接的后面
-                "active": False,
-                "status": "paused"  # 添加状态标记
-            }
-        else:
-            # 客户端既不在 WireGuard 输出中也不在数据库中
-            return {
-                "endpoint": "未连接",
-                "tx": "0 B", 
-                "rx": "0 B",
-                "last_seen": "从未连接",
-                "last_handshake_timestamp": 0,
-                "active": False,
-                "status": "disconnected"
-            }
+        try:
+            client = c.execute('SELECT name, status FROM clients WHERE public_key = ?', (pubkey,)).fetchone()
+            conn.close()
+            
+            if client and client[1] == 'paused':
+                return {
+                    "endpoint": "已暂停",
+                    "tx": "0 B",
+                    "rx": "0 B",
+                    "last_seen": "已暂停",
+                    "last_handshake_timestamp": 0,
+                    "active": False,
+                    "status": "paused",
+                    "allowed_ips": "已暂停"
+                }
+        except:
+            conn.close()
+        
+        # 其他情况：客户端不在WireGuard输出中，也不是暂停状态
+        return {
+            "endpoint": "未连接",
+            "tx": "0 B",
+            "rx": "0 B",
+            "last_seen": "从未连接",
+            "last_handshake_timestamp": 0,
+            "active": False,
+            "status": "disconnected",
+            "allowed_ips": "无"
+        }
         
     except Exception as e:
         print(f"获取客户端状态出错: {e}")
         import traceback
         print(traceback.format_exc())
-        
         return {
             "endpoint": f"错误: {str(e)}",
             "tx": "N/A",
@@ -537,29 +744,42 @@ def get_client_status(interface, pubkey):
             "last_seen": "未知",
             "last_handshake_timestamp": 0,
             "active": False,
-            "status": "error"
+            "status": "error",
+            "allowed_ips": "错误"
         }
-def format_bytes(size):
-    """将字节格式化为人类可读格式"""
-    power = 2**10
-    n = 0
-    units = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
-    while size > power:
-        size /= power
-        n += 1
-    return f"{size:.1f} {units[n]}"
 
-# @app.before_first_request
-# def init():
-#     populate_existing_clients()
-
-@app.before_request
-def before_request_func():
-    if not getattr(app, 'initialized', False):
-        init_db()  # Add this line to create the table first
-        populate_existing_clients()
-        app.initialized = True
-
+def parse_handshake_time(handshake_text):
+    """将WireGuard格式的握手时间转换为时间戳"""
+    try:
+        now = time.time()
+        
+        if not handshake_text or handshake_text == "从未连接":
+            return 0
+            
+        # 解析文本格式的握手时间
+        parts = handshake_text.split(", ")
+        total_seconds = 0
+        
+        for part in parts:
+            part = part.strip()
+            if "second" in part:
+                seconds = int(part.split(" ")[0])
+                total_seconds += seconds
+            elif "minute" in part:
+                minutes = int(part.split(" ")[0])
+                total_seconds += minutes * 60
+            elif "hour" in part:
+                hours = int(part.split(" ")[0])
+                total_seconds += hours * 3600
+            elif "day" in part:
+                days = int(part.split(" ")[0])
+                total_seconds += days * 86400
+        
+        # 计算时间戳
+        return int(now - total_seconds)
+    except Exception as e:
+        print(f"解析握手时间出错: {e}")
+        return 0
 @app.route('/toggle/<name>', methods=['POST'])
 def toggle_client(name):
     """暂停或恢复客户端连接"""
@@ -567,11 +787,20 @@ def toggle_client(name):
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
+    # 检查status字段是否存在
+    try:
+        c.execute("SELECT status FROM clients LIMIT 1")
+    except sqlite3.OperationalError:
+        # 添加status字段
+        c.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'active'")
+        conn.commit()
+    
     client = c.execute('SELECT public_key, interface, ip FROM clients WHERE name = ?', (name,)).fetchone()
-    conn.close()
     
     if not client:
         flash(f"找不到客户端 {name}。", "danger")
+        conn.close()
         return redirect(url_for('index'))
     
     pubkey, interface, ip = client
@@ -580,15 +809,22 @@ def toggle_client(name):
         if action == 'pause':
             # 通过从接口移除对等方来禁用（但保留配置）
             subprocess.call(['wg', 'set', interface, 'peer', pubkey, 'remove'])
+            # 更新数据库中的状态
+            c.execute('UPDATE clients SET status = ? WHERE name = ?', ('paused', name))
             flash(f"客户端 {name} 连接已暂停。", "success")
         else:
             # 通过重新添加对等方来重新启用
             client_ip = ip if '/' in ip else f"{ip}/32"
             subprocess.call(['wg', 'set', interface, 'peer', pubkey, 'allowed-ips', client_ip])
+            # 更新数据库中的状态
+            c.execute('UPDATE clients SET status = ? WHERE name = ?', ('active', name))
             flash(f"客户端 {name} 连接已恢复。", "success")
+        
+        conn.commit()
     except Exception as e:
         flash(f"切换客户端 {name} 状态时出错: {str(e)}", "danger")
     
+    conn.close()
     return redirect(url_for('index'))
 
 @app.route('/qr/<name>')
@@ -607,12 +843,21 @@ def show_qr(name):
 
 @app.route('/sync', methods=['GET', 'POST'])
 def sync_wg_clients():
-    """同步 WireGuard 状态与数据库"""
+    """同步 WireGuard 状态与数据库
+    
+    优先级：
+    1. WireGuard中的活跃连接
+    2. 数据库中标记为暂停的连接
+    3. 其他连接
+    """
     interfaces = get_wg_interfaces()
     updated = 0
     added = 0
+    paused = 0
     
     try:
+        print("开始同步 WireGuard 状态与数据库...")
+        
         # 从WireGuard获取所有对等方信息
         wg_peers = {}
         for interface in interfaces:
@@ -630,50 +875,100 @@ def sync_wg_clients():
                         peer_pubkey = parts[0]
                         endpoint = parts[2] if parts[2] and parts[2] != "(none)" else None
                         allowed_ips = parts[3] if len(parts) > 3 else None
+                        latest_handshake = int(parts[4]) if len(parts) > 4 and parts[4] and parts[4] != "0" else 0
                         
                         # 提取IP地址
                         peer_ip = None
                         if allowed_ips:
                             for ip_cidr in allowed_ips.split(','):
+                                ip_cidr = ip_cidr.strip()
                                 if '/' in ip_cidr:
-                                    peer_ip = ip_cidr.strip()
+                                    peer_ip = ip_cidr
                                     break
+                        
+                        # 确定活跃状态
+                        active = latest_handshake > 0 and (time.time() - latest_handshake) < 600  # 10分钟内活跃
                         
                         wg_peers[peer_pubkey] = {
                             "interface": interface,
                             "ip": peer_ip,
-                            "endpoint": endpoint
+                            "endpoint": endpoint,
+                            "handshake": latest_handshake,
+                            "active": active
                         }
-                        print(f"发现对等方: {peer_pubkey[:15]}..., IP: {peer_ip}")
+                        print(f"发现对等方: {peer_pubkey[:8]}..., IP: {peer_ip}, 活跃: {active}")
             except Exception as e:
                 print(f"处理接口 {interface} 时出错: {e}")
                 continue
         
-        # 从数据库获取所有客户端
+        # 确保数据库中有status字段
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        db_clients = c.execute('SELECT id, name, interface, ip, public_key FROM clients').fetchall()
+        
+        # 检查status字段是否存在
+        try:
+            c.execute("SELECT status FROM clients LIMIT 1")
+        except sqlite3.OperationalError:
+            # 添加status字段
+            c.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'active'")
+            conn.commit()
+            print("数据库中添加status字段")
+        
+        # 获取所有客户端
+        db_clients = c.execute('SELECT id, name, interface, ip, public_key, status FROM clients').fetchall()
         
         # 更新现有客户端的信息
-        for client_id, name, db_interface, db_ip, pubkey in db_clients:
+        for client_row in db_clients:
+            if len(client_row) >= 6:
+                client_id, name, db_interface, db_ip, pubkey, status = client_row
+            else:
+                client_id, name, db_interface, db_ip, pubkey = client_row
+                status = 'active'  # 默认状态
+                
             if pubkey in wg_peers:
+                # 客户端在 WireGuard 中存在
                 peer_info = wg_peers[pubkey]
-                # 检查是否需要更新接口或IP
-                if db_interface != peer_info["interface"] or (peer_info["ip"] and db_ip != peer_info["ip"]):
-                    # 更新客户端信息
-                    new_ip = peer_info["ip"] if peer_info["ip"] else db_ip
-                    c.execute('UPDATE clients SET interface = ?, ip = ? WHERE id = ?', 
-                             (peer_info["interface"], new_ip, client_id))
+                
+                # 需要更新的字段
+                updates = []
+                params = []
+                
+                # 如果接口发生变化
+                if db_interface != peer_info["interface"]:
+                    updates.append("interface = ?")
+                    params.append(peer_info["interface"])
+                
+                # 如果IP发生变化
+                if peer_info["ip"] and db_ip != peer_info["ip"]:
+                    updates.append("ip = ?")
+                    params.append(peer_info["ip"])
+                
+                # 如果之前是暂停状态，现在改为活跃
+                if status == 'paused':
+                    updates.append("status = ?")
+                    params.append('active')
+                
+                # 执行更新
+                if updates:
+                    params.append(client_id)
+                    c.execute(f"UPDATE clients SET {', '.join(updates)} WHERE id = ?", params)
                     updated += 1
-                    print(f"更新客户端 {name} 的接口和IP")
+                    print(f"更新客户端 {name} 的信息")
+                
+                # 从已处理的对等方中移除
+                del wg_peers[pubkey]
+            elif status != 'paused':
+                # 客户端在数据库中但不在 WireGuard 中，且不是已知的暂停状态
+                # 标记为暂停
+                c.execute("UPDATE clients SET status = ? WHERE id = ?", ('paused', client_id))
+                paused += 1
+                print(f"标记客户端 {name} 为暂停状态")
         
-        # 添加数据库中不存在的WireGuard对等方
+        # 添加 WireGuard 中存在但数据库中不存在的对等方
         for pubkey, peer_info in wg_peers.items():
-            # 检查这个公钥是否已经在数据库中
-            existing = c.execute('SELECT COUNT(*) FROM clients WHERE public_key = ?', (pubkey,)).fetchone()[0]
-            if existing == 0 and peer_info["ip"]:
-                # 为新的对等方创建一个唯一名称
-                base_name = f"wg_{pubkey[:6]}"
+            if peer_info["ip"]:  # 确保有 IP 地址
+                # 为新对等方创建一个唯一名称
+                base_name = f"peer_{pubkey[:6]}"
                 new_name = base_name
                 i = 1
                 while c.execute('SELECT COUNT(*) FROM clients WHERE name = ?', (new_name,)).fetchone()[0] > 0:
@@ -682,8 +977,8 @@ def sync_wg_clients():
                 
                 # 添加到数据库
                 c.execute(
-                    'INSERT INTO clients (name, interface, ip, public_key) VALUES (?, ?, ?, ?)',
-                    (new_name, peer_info["interface"], peer_info["ip"], pubkey)
+                    'INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
+                    (new_name, peer_info["interface"], peer_info["ip"], pubkey, 'active')
                 )
                 added += 1
                 print(f"添加新客户端 {new_name}")
@@ -691,7 +986,20 @@ def sync_wg_clients():
         conn.commit()
         conn.close()
         
-        flash(f"同步完成! 更新了 {updated} 个客户端，添加了 {added} 个新发现的客户端。", "success")
+        # 构建结果消息
+        result_parts = []
+        if updated > 0:
+            result_parts.append(f"更新了 {updated} 个客户端")
+        if paused > 0:
+            result_parts.append(f"标记了 {paused} 个客户端为暂停状态")
+        if added > 0:
+            result_parts.append(f"添加了 {added} 个新发现的客户端")
+        
+        if result_parts:
+            flash(f"同步完成! {', '.join(result_parts)}。", "success")
+        else:
+            flash("同步完成! 所有客户端都是最新的。", "success")
+        
     except Exception as e:
         import traceback
         print(f"同步过程中出错: {e}")
@@ -700,5 +1008,114 @@ def sync_wg_clients():
     
     return redirect(url_for('index'))
 
+def get_all_peers_status(interface):
+    """一次性获取指定接口上所有对等方的状态"""
+    try:
+        # 使用标准wg命令获取信息
+        cmd = ["wg", "show", interface]
+        output = subprocess.check_output(cmd).decode().strip()
+        
+        # 调试输出
+        print(f"获取接口 {interface} 上的所有对等方状态")
+        
+        # 将输出拆分为区块
+        sections = output.split("\n\n")
+        if len(sections) < 2:
+            print("输出格式不符合预期，无法拆分为接口和对等方部分")
+            print(f"原始输出: {output}")
+            return {}
+        
+        # 第一个部分是接口信息，后面的都是对等方信息
+        interface_section = sections[0]
+        peer_sections = sections[1:]
+        
+        print(f"找到 {len(peer_sections)} 个对等方区块")
+        
+        peers = {}
+        
+        # 处理每个对等方区块
+        for i, peer_section in enumerate(peer_sections):
+            lines = peer_section.strip().split("\n")
+            
+            # 第一行应该是 "peer: xxx"
+            if not lines or not lines[0].strip().startswith("peer:"):
+                print(f"跳过格式不正确的区块 {i+1}: {lines[0] if lines else '空'}")
+                continue
+            
+            # 提取公钥
+            peer_line = lines[0].strip()
+            current_peer = peer_line.split(":", 1)[1].strip()
+            print(f"处理对等方 {i+1}: {current_peer[:8]}...")
+            
+            # 初始化对等方信息 - 关键是这里要确保标记为active=True
+            peers[current_peer] = {
+                "endpoint": "未连接",
+                "allowed_ips": "无",
+                "latest_handshake": "从未连接",
+                "last_seen": "从未连接",
+                "handshake_timestamp": 0,
+                "last_handshake_timestamp": 0,
+                "transfer_rx": "0 B",
+                "transfer_tx": "0 B",
+                "rx": "0 B",
+                "tx": "0 B",
+                "active": True,  # 默认设为活跃
+                "status": "active"  # 默认设为活跃
+            }
+            
+            # 处理对等方的属性行
+            for j in range(1, len(lines)):
+                line = lines[j].strip()
+                
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    key = parts[0].strip()
+                    value = parts[1].strip() if len(parts) > 1 else ""
+                    
+                    print(f"  属性: {key} = {value}")
+                    
+                    if key == "endpoint":
+                        peers[current_peer]["endpoint"] = value
+                    elif key == "allowed ips":
+                        # 保存完整的allowed ips字符串，不做特殊处理
+                        peers[current_peer]["allowed_ips"] = value
+                        # 如果值为(none)，则标记为非活跃
+                        if value == "(none)":
+                            peers[current_peer]["active"] = False
+                            peers[current_peer]["status"] = "disconnected"
+                    elif key == "latest handshake":
+                        peers[current_peer]["latest_handshake"] = value
+                        peers[current_peer]["last_seen"] = value
+                        handshake_timestamp = parse_handshake_time(value)
+                        peers[current_peer]["handshake_timestamp"] = handshake_timestamp
+                        peers[current_peer]["last_handshake_timestamp"] = handshake_timestamp
+                        # 只有在从未握手的情况下才标记为非活跃
+                        if handshake_timestamp == 0:
+                            peers[current_peer]["active"] = False
+                            peers[current_peer]["status"] = "disconnected"
+                    elif key == "transfer":
+                        # 解析传输信息
+                        parts = value.split(",")
+                        if len(parts) >= 2:
+                            rx_part = parts[0].strip()
+                            tx_part = parts[1].strip()
+                            rx_value = rx_part.split(" received")[0] if " received" in rx_part else rx_part
+                            tx_value = tx_part.split(" sent")[0] if " sent" in tx_part else tx_part
+                            peers[current_peer]["transfer_rx"] = rx_value
+                            peers[current_peer]["transfer_tx"] = tx_value 
+                            peers[current_peer]["rx"] = rx_value 
+                            peers[current_peer]["tx"] = tx_value
+        
+        print(f"接口 {interface} 上成功解析 {len(peers)} 个对等方")
+        # 打印找到的所有peer的公钥前缀和它们的活跃状态
+        for k, v in peers.items():
+            print(f"对等方 {k[:8]}... - 活跃: {v['active']}, 允许的IP: {v['allowed_ips']}")
+        return peers
+        
+    except Exception as e:
+        print(f"获取所有对等方状态出错: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return {}
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=True)
