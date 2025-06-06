@@ -222,84 +222,89 @@ def before_request_func():
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    interfaces = get_wg_interfaces()
-    # 获取当前选择的接口
-    selected_interface = request.args.get('interface', interfaces[0] if interfaces else None)
-    
-    if request.method == 'POST':
-        name = request.form['name']
-        wg_if = request.form['interface']
-        allowed_ips = request.form['allowed_ips']
+    try:
+        interfaces = get_wg_interfaces()
+        selected_interface = request.args.get('interface', interfaces[0] if interfaces else None)
+        if request.method == 'POST':
+            name = request.form['name']
+            wg_if = request.form['interface']
+            allowed_ips = request.form.get('allowed_ips', '')
+            selected_endpoint = request.form.get('selected_endpoint', '')
 
-        result = get_server_info(wg_if)
-        if not result:
-            flash(f"Cannot retrieve server info for interface {wg_if}.", "danger")
-            return redirect(url_for('index'))
-        
-        # 检查 result 的长度，确保正确解包
-        if len(result) >= 2:
-            server_pubkey = result[0]
-            endpoint = result[1] 
-            endpoint_options = result[2] if len(result) >= 3 else []
-        else:
-            flash("Invalid server info format.", "danger")
-            return redirect(url_for('index'))
-
-        # 从 endpoint 中提取子网前缀
-        # 添加调试输出
-        print(f"Endpoint: {endpoint}")
-        
-        # 确保 endpoint 是正确的格式: IP:Port
-        if ':' not in endpoint:
-            flash(f"Invalid endpoint format: {endpoint}", "danger")
-            return redirect(url_for('index'))
-            
-        ip_part = endpoint.split(':')[0]
-        print(f"IP part: {ip_part}")
-        
-        # 验证 IP 是否为有效的 IPv4 地址
-        if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip_part):
-            flash(f"Invalid IP address in endpoint: {ip_part}", "danger")
-            return redirect(url_for('index'))
-            
-        # 从 IP 中提取子网前缀
-        subnet = '.'.join(ip_part.split('.')[:3])  # 提取前三个部分如 "10.0.0"
-        print(f"Extracted subnet: {subnet}")
-
-        ip_last_octet = request.form.get('ip_last_octet', '').strip()
-        used_ips = get_existing_peer_ips(wg_if)
-        client_ip = None
-
-        if ip_last_octet and ip_last_octet.isdigit():
-            candidate = f"{subnet}.{ip_last_octet}"
-            if candidate in used_ips:
-                flash(f"IP {candidate} is already used.", "danger")
-                return redirect(url_for('index'))
-            client_ip = f"{candidate}/32"
-        else:
-            for i in range(2, 255):
-                candidate = f"{subnet}.{i}"
-                if candidate not in used_ips:
-                    client_ip = f"{candidate}/32"
-                    break
-            if not client_ip:
-                flash("No available IP addresses in subnet.", "danger")
+            result = get_server_info(wg_if)
+            if not result:
+                flash(f"无法获取接口 {wg_if} 的服务器信息", "danger")
                 return redirect(url_for('index'))
 
-        privkey, pubkey = generate_keys()
-        if not allowed_ips:
-            allowed_ips = "0.0.0.0/0, ::/0"
-        else:
-            allowed_ips += f", {subnet}.0/24"
+            if len(result) >= 2:
+                server_pubkey = result[0]
+                endpoint = selected_endpoint if selected_endpoint else result[1]
+                endpoint_options = result[2] if len(result) >= 3 else []
+            else:
+                flash("服务器信息格式无效", "danger")
+                return redirect(url_for('index'))
 
-        # 添加调试输出
-        print(f"Generated client IP: {client_ip}")
-        
-        conf_content = f"""
+            if ':' not in endpoint:
+                endpoint = f"{endpoint}:51820"
+
+            ip_part = endpoint.split(':')[0]
+
+            # 允许域名或IPv4
+            if not (re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip_part) or re.match(r'^[a-zA-Z0-9.-]+$', ip_part)):
+                flash(f"端点中的IP地址无效: {ip_part}", "danger")
+                return redirect(url_for('index'))
+
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                existing_client = conn.execute('SELECT ip FROM clients WHERE interface = ? LIMIT 1', (wg_if,)).fetchone()
+                conn.close()
+                if existing_client and existing_client[0]:
+                    client_ip = existing_client[0].split('/')[0] if '/' in existing_client[0] else existing_client[0]
+                    subnet = '.'.join(client_ip.split('.')[:3])
+                else:
+                    subnet = '.'.join(ip_part.split('.')[:3])
+            except Exception:
+                subnet = '.'.join(ip_part.split('.')[:3])
+
+            ip_last_octet = request.form.get('ip_last_octet', '').strip()
+            used_ips = get_existing_peer_ips(wg_if)
+            client_ip = None
+
+            if ip_last_octet and ip_last_octet.isdigit():
+                candidate = f"{subnet}.{ip_last_octet}"
+                if candidate in used_ips:
+                    flash(f"IP {candidate} 已被使用", "danger")
+                    return redirect(url_for('index'))
+                client_ip = f"{candidate}/32"
+            else:
+                for i in range(2, 255):
+                    candidate = f"{subnet}.{i}"
+                    if candidate not in used_ips:
+                        client_ip = f"{candidate}/32"
+                        break
+                if not client_ip:
+                    flash("子网中没有可用的IP地址", "danger")
+                    return redirect(url_for('index'))
+
+            try:
+                privkey, pubkey = generate_keys()
+            except Exception as e:
+                flash(f"生成密钥时出错: {str(e)}", "danger")
+                return redirect(url_for('index'))
+
+            if not allowed_ips:
+                allowed_ips = "0.0.0.0/0, ::/0"
+            else:
+                user_ips = [ip.strip() for ip in allowed_ips.split(',')]
+                subnet_net = f"{subnet}.0/24"
+                if subnet_net not in user_ips:
+                    allowed_ips += f", {subnet_net}"
+
+            conf_content = f"""
 [Interface]
 PrivateKey = {privkey}
 Address = {client_ip}
-DNS = 1.1.1.1
+DNS = 1.1.1.1,8.8.4.4
 
 [Peer]
 PublicKey = {server_pubkey}
@@ -307,117 +312,52 @@ Endpoint = {endpoint}
 AllowedIPs = {allowed_ips}
 PersistentKeepalive = 25
 """
-        conf_path = os.path.join(CLIENT_OUTPUT_DIR, f"wg{name}.conf")
-        with open(conf_path, 'w') as f:
-            f.write(conf_content)
-            # Generate QR code and save as base64
-            qr = qrcode.make(conf_content)
-            buffer = BytesIO()
-            qr.save(buffer, format='PNG')
-            qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            # Save to SQLite with status='active'
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute('INSERT INTO clients (name, interface, ip, public_key, qr_base64, status) VALUES (?, ?, ?, ?, ?, ?)',
-                      (name, wg_if, client_ip, pubkey, qr_base64, 'active'))
-            conn.commit()
-            conn.close()
+            os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
+            conf_path = os.path.join(CLIENT_OUTPUT_DIR, f"wg{name}.conf")
+            try:
+                with open(conf_path, 'w') as f:
+                    f.write(conf_content)
+            except Exception as e:
+                flash(f"写入配置文件时出错: {str(e)}", "danger")
+                return redirect(url_for('index'))
 
-        # Apply to running WG instance and save to server config
-        subprocess.call(["wg", "set", wg_if, "peer", pubkey, "allowed-ips", client_ip])
-        with open(os.path.join(WG_CONF_DIR, f"{wg_if}.conf"), 'a') as f:
-            if not any("# endpoint:" in line for line in open(os.path.join(WG_CONF_DIR, f"{wg_if}.conf"))):
-                f.write(f"\n# endpoint: {endpoint}\n")
-            f.write(f"\n# Client {name}\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {client_ip}\n")
+            try:
+                qr = qrcode.make(conf_content)
+                buffer = BytesIO()
+                qr.save(buffer, format='PNG')
+                qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            except Exception:
+                qr_base64 = None
 
-        flash(f"Client config generated and saved: wg{name}.conf", "success")
-        return redirect(url_for('index'))
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute('INSERT INTO clients (name, interface, ip, public_key, qr_base64, status) VALUES (?, ?, ?, ?, ?, ?)',
+                        (name, wg_if, client_ip, pubkey, qr_base64, 'active'))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                flash(f"保存到数据库时出错: {str(e)}", "danger")
+                return redirect(url_for('index'))
 
-    # 获取客户端数据并添加状态信息，按接口过滤
-    conn = sqlite3.connect(DB_PATH)
-    
-    # 如果指定了接口，只获取该接口的客户端
-    if selected_interface:
-        # 尝试获取status字段，如果不存在就不查询它
-        try:
-            client_records = conn.execute(
-                'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients WHERE interface = ? ORDER BY id DESC', 
-                (selected_interface,)
-            ).fetchall()
-        except sqlite3.OperationalError:
-            client_records = conn.execute(
-                'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
-                (selected_interface,)
-            ).fetchall()
-    else:
-        # 否则获取所有客户端
-        try:
-            client_records = conn.execute(
-                'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients ORDER BY id DESC'
-            ).fetchall()
-        except sqlite3.OperationalError:
-            client_records = conn.execute(
-                'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC'
-            ).fetchall()
-    
-    conn.close()
-    
-    # 优化：预先获取所有接口的所有对等方状态，避免重复调用wg命令
-    all_peers_status = {}
-    missing_peers = []  # 存储WireGuard中有但数据库中没有的对等方
-    
-    for interface in interfaces:
-        peers_in_interface = get_all_peers_status(interface)
-        all_peers_status[interface] = peers_in_interface
-        
-        # 检查是否有在WireGuard中但不在数据库中的对等方
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        for pubkey, peer_info in peers_in_interface.items():
-            exists = c.execute('SELECT COUNT(*) FROM clients WHERE public_key = ?', (pubkey,)).fetchone()[0]
-            if exists == 0:
-                # 找到了WireGuard中有但数据库中没有的对等方
-                # 提取IP地址
-                allowed_ips = peer_info.get("allowed_ips", "无")
-                ip = "未知"
-                if allowed_ips != "无" and allowed_ips != "(none)":
-                    ip_parts = allowed_ips.split(",")[0].strip()  # 取第一个IP/网段
-                    if "/" in ip_parts:
-                        ip = ip_parts  # 包含CIDR
-                
-                missing_peers.append({
-                    "pubkey": pubkey,
-                    "interface": interface,
-                    "ip": ip,
-                    "allowed_ips": allowed_ips
-                })
-        conn.close()
-    
-    # 如果发现了缺失的对等方，自动添加到数据库
-    if missing_peers:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        for peer in missing_peers:
-            # 为新对等方创建一个唯一名称
-            base_name = f"auto_{peer['pubkey'][:6]}"
-            new_name = base_name
-            i = 1
-            while c.execute('SELECT COUNT(*) FROM clients WHERE name = ?', (new_name,)).fetchone()[0] > 0:
-                new_name = f"{base_name}_{i}"
-                i += 1
-            
-            # 添加到数据库
-            c.execute(
-                'INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
-                (new_name, peer["interface"], peer["ip"], peer["pubkey"], 'active')
-            )
-            print(f"自动添加WireGuard对等方到数据库: {new_name}, 公钥: {peer['pubkey'][:8]}...")
-        
-        conn.commit()
-        conn.close()
-        flash(f"已自动添加 {len(missing_peers)} 个在WireGuard中发现但数据库中不存在的客户端", "success")
-        
-        # 重新加载客户端列表以包含新添加的客户端
+            try:
+                subprocess.call(["wg", "set", wg_if, "peer", pubkey, "allowed-ips", client_ip])
+            except Exception as e:
+                flash(f"应用WireGuard配置时出错: {str(e)}", "danger")
+
+            try:
+                server_conf_path = os.path.join(WG_CONF_DIR, f"{wg_if}.conf")
+                if os.path.exists(server_conf_path):
+                    with open(server_conf_path, 'a') as f:
+                        if not any("# endpoint:" in line for line in open(server_conf_path)):
+                            f.write(f"\n# endpoint: {endpoint}\n")
+                        f.write(f"\n# Client {name}\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {client_ip}\n")
+            except Exception as e:
+                flash(f"更新服务器配置文件时出错: {str(e)}", "danger")
+
+            flash(f"客户端配置已生成并保存: wg{name}.conf", "success")
+            return redirect(url_for('index'))
+
         conn = sqlite3.connect(DB_PATH)
         if selected_interface:
             try:
@@ -431,7 +371,6 @@ PersistentKeepalive = 25
                     (selected_interface,)
                 ).fetchall()
         else:
-            # 否则获取所有客户端
             try:
                 client_records = conn.execute(
                     'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients ORDER BY id DESC'
@@ -441,96 +380,138 @@ PersistentKeepalive = 25
                     'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC'
                 ).fetchall()
         conn.close()
-    
-    # 增强客户端数据
-    clients_with_status = []
-    for client in client_records:
-        # 检查是否有status字段
-        if len(client) >= 7:
-            name, ip, interface, created_at, qr_base64, pubkey, db_status = client
-        else:
-            name, ip, interface, created_at, qr_base64, pubkey = client
-            db_status = 'active'  # 默认状态
-        
-        # 添加调试输出
-        print(f"处理客户端: {name}, 公钥: {pubkey[:8] if len(pubkey) >= 8 else pubkey}...")
-        
-        # 从缓存中获取状态信息，而不是每次都调用命令
-        if interface in all_peers_status and pubkey in all_peers_status[interface]:
-            status = all_peers_status[interface][pubkey]
-        else:
-            # 如果在缓存中找不到，则使用默认的断开连接状态
-            status = {
-                "endpoint": "未连接",
-                "tx": "0 B",
-                "rx": "0 B",
-                "last_seen": "从未连接",
-                "last_handshake_timestamp": 0,
-                "active": False,
-                "status": "disconnected",
-                "allowed_ips": "无"
-            }
-        
-        # 如果数据库中是暂停状态，覆盖状态信息
-        if db_status == 'paused':
-            status['status'] = 'paused'
-            status['active'] = False
-            status['endpoint'] = '已暂停'
-            status['last_seen'] = '已暂停'
-        
-        clients_with_status.append({
-            "name": name,
-            "wg_ip": ip.split('/')[0] if '/' in ip else ip,
-            "interface": interface,
-            "created_at": created_at,
-            "qr_base64": qr_base64,
-            "pubkey": pubkey,
-            "endpoint_ip": status["endpoint"],
-            "tx": status["tx"],
-            "rx": status["rx"],
-            "last_seen": status["last_seen"],
-            "last_handshake_timestamp": status.get("last_handshake_timestamp", 0),
-            "active": status["active"],
-            "status": status.get("status", "disconnected"),
-            "allowed_ips": status.get("allowed_ips", "无")
-        })
-    
-    # 添加调试输出
-    print(f"总客户端数: {len(clients_with_status)}")
-    active_count = sum(1 for c in clients_with_status if c.get("active", False))
-    paused_count = sum(1 for c in clients_with_status if c.get("status") == "paused")
-    disconnected_count = len(clients_with_status) - active_count - paused_count
-    print(f"活跃客户端: {active_count}, 暂停客户端: {paused_count}, 未连接客户端: {disconnected_count}")
 
-    # 根据状态分组客户端
-    active_clients = [c for c in clients_with_status if c["active"]]
-    paused_clients = [c for c in clients_with_status if c.get("status") == "paused"]
-    inactive_clients = [c for c in clients_with_status 
-                       if not c["active"] and c.get("status") != "paused"]
-
-    # 按照最后握手时间排序活跃客户端（最近的在前）
-    active_clients.sort(key=lambda x: x.get("last_handshake_timestamp", 0), reverse=True)
-
-    # 合并列表：活跃 > 暂停 > 未连接
-    clients_with_status = active_clients + paused_clients + inactive_clients
-    
-    used_ips = []
-    endpoint_options = []
-    if interfaces:
-        try:
-            used_ips = get_existing_peer_ips(interfaces[0])
-            server_info = get_server_info(interfaces[0])
-            if server_info and len(server_info) == 3:
-                _, _, endpoint_options = server_info
+        all_peers_status = {}
+        missing_peers = []
+        for interface in interfaces:
+            peers_in_interface = get_all_peers_status(interface)
+            all_peers_status[interface] = peers_in_interface
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            for pubkey, peer_info in peers_in_interface.items():
+                exists = c.execute('SELECT COUNT(*) FROM clients WHERE public_key = ?', (pubkey,)).fetchone()[0]
+                if exists == 0:
+                    allowed_ips = peer_info.get("allowed_ips", "无")
+                    ip = "未知"
+                    if allowed_ips != "无" and allowed_ips != "(none)":
+                        ip_parts = allowed_ips.split(",")[0].strip()
+                        if "/" in ip_parts:
+                            ip = ip_parts
+                    missing_peers.append({
+                        "pubkey": pubkey,
+                        "interface": interface,
+                        "ip": ip,
+                        "allowed_ips": allowed_ips
+                    })
+            conn.close()
+        if missing_peers:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            for peer in missing_peers:
+                base_name = f"auto_{peer['pubkey'][:6]}"
+                new_name = base_name
+                i = 1
+                while c.execute('SELECT COUNT(*) FROM clients WHERE name = ?', (new_name,)).fetchone()[0] > 0:
+                    new_name = f"{base_name}_{i}"
+                    i += 1
+                c.execute(
+                    'INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
+                    (new_name, peer["interface"], peer["ip"], peer["pubkey"], 'active')
+                )
+            conn.commit()
+            conn.close()
+            flash(f"已自动添加 {len(missing_peers)} 个在WireGuard中发现但数据库中不存在的客户端", "success")
+            conn = sqlite3.connect(DB_PATH)
+            if selected_interface:
+                try:
+                    client_records = conn.execute(
+                        'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients WHERE interface = ? ORDER BY id DESC', 
+                        (selected_interface,)
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    client_records = conn.execute(
+                        'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients WHERE interface = ? ORDER BY id DESC', 
+                        (selected_interface,)
+                    ).fetchall()
             else:
+                try:
+                    client_records = conn.execute(
+                        'SELECT name, ip, interface, created_at, qr_base64, public_key, status FROM clients ORDER BY id DESC'
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    client_records = conn.execute(
+                        'SELECT name, ip, interface, created_at, qr_base64, public_key FROM clients ORDER BY id DESC'
+                    ).fetchall()
+            conn.close()
+
+        clients_with_status = []
+        for client in client_records:
+            if len(client) >= 7:
+                name, ip, interface, created_at, qr_base64, pubkey, db_status = client
+            else:
+                name, ip, interface, created_at, qr_base64, pubkey = client
+                db_status = 'active'
+            if interface in all_peers_status and pubkey in all_peers_status[interface]:
+                status = all_peers_status[interface][pubkey]
+            else:
+                status = {
+                    "endpoint": "未连接",
+                    "tx": "0 B",
+                    "rx": "0 B",
+                    "last_seen": "从未连接",
+                    "last_handshake_timestamp": 0,
+                    "active": False,
+                    "status": "disconnected",
+                    "allowed_ips": "无"
+                }
+            if db_status == 'paused':
+                status['status'] = 'paused'
+                status['active'] = False
+                status['endpoint'] = '已暂停'
+                status['last_seen'] = '已暂停'
+            clients_with_status.append({
+                "name": name,
+                "wg_ip": ip.split('/')[0] if '/' in ip else ip,
+                "interface": interface,
+                "created_at": created_at,
+                "qr_base64": qr_base64,
+                "pubkey": pubkey,
+                "endpoint_ip": status["endpoint"],
+                "tx": status["tx"],
+                "rx": status["rx"],
+                "last_seen": status["last_seen"],
+                "last_handshake_timestamp": status.get("last_handshake_timestamp", 0),
+                "active": status["active"],
+                "status": status.get("status", "disconnected"),
+                "allowed_ips": status.get("allowed_ips", "无")
+            })
+
+        active_clients = [c for c in clients_with_status if c["active"]]
+        paused_clients = [c for c in clients_with_status if c.get("status") == "paused"]
+        inactive_clients = [c for c in clients_with_status if not c["active"] and c.get("status") != "paused"]
+        active_clients.sort(key=lambda x: x.get("last_handshake_timestamp", 0), reverse=True)
+        inactive_clients.sort(key=lambda x: x.get("last_handshake_timestamp", 0), reverse=True)
+        clients_with_status = active_clients + paused_clients + inactive_clients
+
+        used_ips = []
+        endpoint_options = []
+        if interfaces:
+            try:
+                used_ips = get_existing_peer_ips(interfaces[0])
+                server_info = get_server_info(interfaces[0])
+                if server_info and len(server_info) == 3:
+                    _, _, endpoint_options = server_info
+                else:
+                    endpoint_options = []
+            except Exception:
+                used_ips = []
                 endpoint_options = []
-        except Exception:
-            used_ips = []
-            endpoint_options = []
-    return render_template('index.html', interfaces=interfaces, clients=clients_with_status, 
-                          files=os.listdir(CLIENT_OUTPUT_DIR), used_ips=used_ips, 
-                          endpoint_options=endpoint_options,
-                          selected_interface=selected_interface)  # 传递选定接口到模板
+        return render_template('index.html', interfaces=interfaces, clients=clients_with_status, 
+                              files=os.listdir(CLIENT_OUTPUT_DIR), used_ips=used_ips, 
+                              endpoint_options=endpoint_options,
+                              selected_interface=selected_interface)
+    except Exception as e:
+        return "500 Internal Server Error", 500
 
 
 @app.route('/download/<filename>')
@@ -955,7 +936,7 @@ def sync_wg_clients():
                 # 从已处理的对等方中移除
                 del wg_peers[pubkey]
             elif status != 'paused':
-                # 客户端在数据库中但不在 WireGuard 中，且不是已知的暂停状态
+                # 客户端在数据库中但不在WireGuard中，且不是已知的暂停状态
                 # 标记为暂停
                 c.execute("UPDATE clients SET status = ? WHERE id = ?", ('paused', client_id))
                 paused += 1
@@ -1012,21 +993,18 @@ def get_all_peers_status(interface):
         cmd = ["wg", "show", interface]
         output = subprocess.check_output(cmd).decode().strip()
         
-        # 调试输出
+        # 精简日志，只保留重要信息
         print(f"获取接口 {interface} 上的所有对等方状态")
         
         # 将输出拆分为区块
         sections = output.split("\n\n")
         if len(sections) < 2:
             print("输出格式不符合预期，无法拆分为接口和对等方部分")
-            print(f"原始输出: {output}")
             return {}
         
         # 第一个部分是接口信息，后面的都是对等方信息
         interface_section = sections[0]
         peer_sections = sections[1:]
-        
-        print(f"找到 {len(peer_sections)} 个对等方区块")
         
         peers = {}
         
@@ -1036,13 +1014,11 @@ def get_all_peers_status(interface):
             
             # 第一行应该是 "peer: xxx"
             if not lines or not lines[0].strip().startswith("peer:"):
-                print(f"跳过格式不正确的区块 {i+1}: {lines[0] if lines else '空'}")
                 continue
             
             # 提取公钥
             peer_line = lines[0].strip()
             current_peer = peer_line.split(":", 1)[1].strip()
-            print(f"处理对等方 {i+1}: {current_peer[:8]}...")
             
             # 初始化对等方信息
             peers[current_peer] = {
@@ -1069,8 +1045,6 @@ def get_all_peers_status(interface):
                     key = parts[0].strip()
                     value = parts[1].strip() if len(parts) > 1 else ""
                     
-                    print(f"  属性: {key} = {value}")
-                    
                     if key == "endpoint":
                         peers[current_peer]["endpoint"] = value
                     elif key == "allowed ips":
@@ -1088,9 +1062,6 @@ def get_all_peers_status(interface):
                         if handshake_timestamp > 0 and (now - handshake_timestamp) <= 150:
                             peers[current_peer]["active"] = True
                             peers[current_peer]["status"] = "active"
-                            print(f"  活跃状态: 是 (最近握手: {int(now - handshake_timestamp)}秒前)")
-                        else:
-                            print(f"  活跃状态: 否 (最近握手: {int(now - handshake_timestamp) if handshake_timestamp > 0 else '从未'}秒前)")
                     elif key == "transfer":
                         # 解析传输信息
                         parts = value.split(",")
@@ -1104,10 +1075,9 @@ def get_all_peers_status(interface):
                             peers[current_peer]["rx"] = rx_value 
                             peers[current_peer]["tx"] = tx_value
         
-        print(f"接口 {interface} 上成功解析 {len(peers)} 个对等方")
-        # 打印活跃客户端的数量
+        # 只保留重要的摘要信息
         active_count = sum(1 for v in peers.values() if v["active"])
-        print(f"活跃客户端: {active_count}/{len(peers)} (活跃定义: 最近150秒内有握手)")
+        print(f"接口 {interface} 上找到 {len(peers)} 个对等方，其中 {active_count} 个活跃")
         return peers
         
     except Exception as e:

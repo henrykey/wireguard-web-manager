@@ -18,7 +18,8 @@
         <div class="card mb-4">
             <div class="card-header">添加新客户端</div>
             <div class="card-body">
-                <form method="POST">
+                <!-- 修复表单结构 -->
+                <form method="POST" action="{{ url_for('index') }}">
                     <div class="mb-3">
                       <label for="name" class="form-label">客户端名称</label>
                       <input type="text" class="form-control" name="name" id="name" required>
@@ -43,16 +44,20 @@
                       <input type="number" class="form-control" name="ip_last_octet" id="ip_last_octet" placeholder="例如：7" min="2" max="254">
                     </div>
             
+                    <!-- 端点选择部分 -->
+                    {% if endpoint_options %}
                     <div class="mb-3">
-                      <label for="endpoint" class="form-label">选择端点</label>
-                      <select class="form-select" name="endpoint" id="endpoint" required>
+                      <label for="endpoint_select" class="form-label">服务器端点</label>
+                      <select class="form-select" id="endpoint_select" name="selected_endpoint">
                         {% for ep in endpoint_options %}
                           <option value="{{ ep }}">{{ ep }}</option>
                         {% endfor %}
                       </select>
                     </div>
-            
-                    <button type="submit" class="btn btn-primary">生成配置</button>
+                    {% endif %}
+                    
+                    <!-- 提交按钮 -->
+                    <button type="submit" class="btn btn-primary">生成客户端配置</button>
                   </form>
             </div>
         </div>
