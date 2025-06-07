@@ -13,18 +13,81 @@
 <body>
     <div class="container mt-4">
         <h1>WireGuard 管理器</h1>
-        
+
+        <!-- 服务端配置Tab -->
+        <div class="card mb-4">
+            <div class="card-header">服务端配置</div>
+            <div class="card-body">
+                {% if not has_server_conf %}
+                <form method="post">
+                    <input type="hidden" name="action" value="create_server_conf">
+                    <div class="mb-3">
+                        <label class="form-label">配置文件名</label>
+                        <input type="text" class="form-control" name="filename" value="wg0.conf" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">配置内容</label>
+                        <textarea class="form-control" name="conf_content" id="conf_content" rows="12" required>{{ default_conf }}</textarea>
+                    </div>
+                    <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn">自动生成 PrivateKey</button>
+                    <button type="submit" class="btn btn-primary">保存配置</button>
+                </form>
+                <script>
+                document.getElementById('gen-key-btn').onclick = function() {
+                    fetch('{{ url_for("gen_server_key") }}')
+                        .then(resp => resp.json())
+                        .then(data => {
+                            let textarea = document.getElementById('conf_content');
+                            textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
+                        });
+                };
+                </script>
+                {% else %}
+                <form method="get" id="select-server-form">
+                    <div class="mb-3">
+                        <label class="form-label">选择接口配置</label>
+                        <select class="form-select" name="edit_conf" id="edit_conf" onchange="this.form.submit()">
+                            {% for conf in server_configs %}
+                            <option value="{{ conf }}" {% if selected_conf == conf %}selected{% endif %}>{{ conf }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </form>
+                <form method="post">
+                    <input type="hidden" name="action" value="edit_server_conf">
+                    <input type="hidden" name="filename" value="{{ selected_conf }}">
+                    <div class="mb-3">
+                        <label class="form-label">编辑配置内容</label>
+                        <textarea class="form-control" name="conf_content" id="edit_conf_content" rows="12" required>{{ edit_conf_content }}</textarea>
+                    </div>
+                    <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn-edit">自动生成 PrivateKey</button>
+                    <button type="submit" class="btn btn-primary">保存修改</button>
+                    <button type="submit" name="action" value="start_server" class="btn btn-success ms-2">启动接口</button>
+                    <button type="submit" name="action" value="restart_server" class="btn btn-warning ms-2">重启接口</button>
+                </form>
+                <script>
+                document.getElementById('gen-key-btn-edit').onclick = function() {
+                    fetch('{{ url_for("gen_server_key") }}')
+                        .then(resp => resp.json())
+                        .then(data => {
+                            let textarea = document.getElementById('edit_conf_content');
+                            textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
+                        });
+                };
+                </script>
+                {% endif %}
+            </div>
+        </div>
+
         <!-- 添加新客户端表单 -->
         <div class="card mb-4">
             <div class="card-header">添加新客户端</div>
             <div class="card-body">
-                <!-- 修复表单结构 -->
                 <form method="POST" action="{{ url_for('index') }}">
                     <div class="mb-3">
                       <label for="name" class="form-label">客户端名称</label>
                       <input type="text" class="form-control" name="name" id="name" required>
                     </div>
-            
                     <div class="mb-3">
                       <label for="interface" class="form-label">WireGuard 接口</label>
                       <select class="form-select" name="interface" id="interface">
@@ -33,18 +96,14 @@
                         {% endfor %}
                       </select>
                     </div>
-            
                     <div class="mb-3">
                       <label for="allowed_ips" class="form-label">允许的 IPs（可选）</label>
                       <input type="text" class="form-control" name="allowed_ips" id="allowed_ips" placeholder="例如：192.168.1.0/24">
                     </div>
-            
                     <div class="mb-3">
                       <label for="ip_last_octet" class="form-label">自定义 IP 最后一个八位组（可选）</label>
                       <input type="number" class="form-control" name="ip_last_octet" id="ip_last_octet" placeholder="例如：7" min="2" max="254">
                     </div>
-            
-                    <!-- 端点选择部分 -->
                     {% if endpoint_options %}
                     <div class="mb-3">
                       <label for="endpoint_select" class="form-label">服务器端点</label>
@@ -52,13 +111,22 @@
                         {% for ep in endpoint_options %}
                           <option value="{{ ep }}">{{ ep }}</option>
                         {% endfor %}
+                        <option value="">手动填写</option>
                       </select>
+                      <input type="text" class="form-control mt-2" name="manual_endpoint" id="manual_endpoint" placeholder="如 1.2.3.4:51820" style="display:none;">
                     </div>
+                    <script>
+                    document.getElementById('endpoint_select').onchange = function() {
+                        if(this.value === "") {
+                            document.getElementById('manual_endpoint').style.display = '';
+                        } else {
+                            document.getElementById('manual_endpoint').style.display = 'none';
+                        }
+                    };
+                    </script>
                     {% endif %}
-                    
-                    <!-- 提交按钮 -->
                     <button type="submit" class="btn btn-primary">生成客户端配置</button>
-                  </form>
+                </form>
             </div>
         </div>
 
@@ -75,11 +143,10 @@
                 </ul>
             </div>
             <div class="card-body">
-                <!-- 添加到客户端列表上方，例如在标签页导航下方 -->
                 <div class="mb-3 mt-3">
                     <form action="{{ url_for('sync_wg_clients') }}" method="POST" style="display: inline;">
                         <button type="submit" class="btn btn-warning">
-                            <i class="bi bi-arrow-repeat"></i> 同步 WireGuard 状态
+                            同步 WireGuard 状态
                         </button>
                     </form>
                 </div>
@@ -111,7 +178,6 @@
                             </tbody>
                         </table>
                     </div>
-                    
                     <!-- 管理标签页 -->
                     <div class="tab-pane fade" id="manage" role="tabpanel" aria-labelledby="manage-tab">
                         <table class="table table-striped">
@@ -134,7 +200,6 @@
                                             <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#renameModal{{ client.name }}">
                                                 重命名
                                             </button>
-                                            
                                             <form action="{{ url_for('toggle_client', name=client.name) }}" method="POST" style="display: inline;">
                                                 {% if client.active %}
                                                 <input type="hidden" name="action" value="pause">
@@ -144,20 +209,16 @@
                                                 <button type="submit" class="btn btn-outline-success">恢复</button>
                                                 {% endif %}
                                             </form>
-                                            
                                             <a href="{{ url_for('show_qr', name=client.name) }}" class="btn btn-outline-secondary">
                                                 显示二维码
                                             </a>
-                                            
                                             <a href="{{ url_for('download', filename='wg' + client.name + '.conf') }}" class="btn btn-outline-info">
                                                 下载配置
                                             </a>
-                                            
                                             <form action="{{ url_for('delete_client', name=client.name) }}" method="POST" onsubmit="return confirm('确定要删除此客户端吗?');" style="display: inline;">
                                                 <button type="submit" class="btn btn-outline-danger">删除</button>
                                             </form>
                                         </div>
-                                        
                                         <!-- 重命名模态框 -->
                                         <div class="modal fade" id="renameModal{{ client.name }}" tabindex="-1" aria-hidden="true">
                                             <div class="modal-dialog">
@@ -195,8 +256,16 @@
             </div>
         </div>
     </div>
-    
-    <!-- 确保引入Bootstrap的JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 保证刷新后tab保持
+        const hash = window.location.hash;
+        if (hash) {
+            const tabTrigger = document.querySelector(`button[data-bs-target="${hash}"]`);
+            if (tabTrigger) {
+                new bootstrap.Tab(tabTrigger).show();
+            }
+        }
+    </script>
 </body>
 </html>
