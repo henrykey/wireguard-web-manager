@@ -311,16 +311,22 @@ PrivateKey = # 请手动生成或用 wg genkey
             if ':' not in endpoint:
                 endpoint = f"{endpoint}:51820"
 
-            # ----------- 修正subnet获取逻辑 -----------
-            # 获取服务端接口的内网IP
+            ip_part = endpoint.split(':')[0]
+            if not (re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip_part) or re.match(r'^[a-zA-Z0-9.-]+$', ip_part)):
+                flash(f"端点中的IP地址无效: {ip_part}", "danger")
+                return redirect(url_for('index'))
+
             try:
-                ip_output = subprocess.check_output(
-                    f"ip -4 addr show dev {wg_if} | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){{3}}/\\d+'",
-                    shell=True
-                ).decode().strip().split('/')[0]
-                subnet = '.'.join(ip_output.split('.')[:3])
+                conn = sqlite3.connect(DB_PATH)
+                existing_client = conn.execute('SELECT ip FROM clients WHERE interface = ? LIMIT 1', (wg_if,)).fetchone()
+                conn.close()
+                if existing_client and existing_client[0]:
+                    client_ip = existing_client[0].split('/')[0] if '/' in existing_client[0] else existing_client[0]
+                    subnet = '.'.join(client_ip.split('.')[:3])
+                else:
+                    subnet = '.'.join(ip_part.split('.')[:3])
             except Exception:
-                subnet = "10.0.0"  # fallback
+                subnet = '.'.join(ip_part.split('.')[:3])
 
             ip_last_octet = request.form.get('ip_last_octet', '').strip()
             used_ips = get_existing_peer_ips(wg_if)
@@ -451,7 +457,11 @@ PersistentKeepalive = 25
             ).fetchall()
     conn.close()
 
-    # 你原有的 clients_with_status 组装逻辑
+    # 获取所有接口的所有peer状态
+    all_peers_status = {}
+    for interface in interfaces:
+        all_peers_status[interface] = get_all_peers_status(interface)
+
     clients_with_status = []
     for client in client_records:
         if len(client) >= 7:
@@ -459,7 +469,29 @@ PersistentKeepalive = 25
         else:
             name, ip, interface, created_at, qr_base64, pubkey = client
             db_status = 'active'
-        # 这里可以补充状态信息，也可以只简单组装
+        # 调试输出
+        print(f"\n=== 客户端: {name} ===")
+        print(f"数据库 pubkey: '{pubkey}'")
+        print(f"接口: {interface}")
+        print(f"WireGuard peers: {list(all_peers_status[interface].keys())}")
+        if pubkey in all_peers_status[interface]:
+            status = all_peers_status[interface][pubkey]
+        else:
+            status = {
+                "endpoint": "未连接",
+                "tx": "0 B",
+                "rx": "0 B",
+                "last_seen": "从未连接",
+                "last_handshake_timestamp": 0,
+                "active": False,
+                "status": "disconnected",
+                "allowed_ips": "无"
+            }
+        if db_status == 'paused':
+            status['status'] = 'paused'
+            status['active'] = False
+            status['endpoint'] = '已暂停'
+            status['last_seen'] = '已暂停'
         clients_with_status.append({
             "name": name,
             "wg_ip": ip.split('/')[0] if '/' in ip else ip,
@@ -467,7 +499,14 @@ PersistentKeepalive = 25
             "created_at": created_at,
             "qr_base64": qr_base64,
             "pubkey": pubkey,
-            "status": db_status
+            "endpoint_ip": status["endpoint"],
+            "tx": status["tx"],
+            "rx": status["rx"],
+            "last_seen": status["last_seen"],
+            "last_handshake_timestamp": status.get("last_handshake_timestamp", 0),
+            "active": status["active"],
+            "status": status.get("status", "disconnected"),
+            "allowed_ips": status.get("allowed_ips", "无")
         })
 
     # ----------- 渲染模板 -----------
@@ -481,7 +520,7 @@ PersistentKeepalive = 25
         interfaces=interfaces,
         selected_interface=selected_interface,
         endpoint_options=endpoint_options,
-        clients=clients_with_status,  # 恢复客户端列表
+        clients=clients_with_status,  # 恢复客户端列表和状态
         # ...其它你原有的模板变量...
     )
 
@@ -963,35 +1002,19 @@ def get_all_peers_status(interface):
         # 使用标准wg命令获取信息
         cmd = ["wg", "show", interface]
         output = subprocess.check_output(cmd).decode().strip()
-        
-        # 精简日志，只保留重要信息
         print(f"获取接口 {interface} 上的所有对等方状态")
-        
-        # 将输出拆分为区块
         sections = output.split("\n\n")
         if len(sections) < 2:
             print("输出格式不符合预期，无法拆分为接口和对等方部分")
             return {}
-        
-        # 第一个部分是接口信息，后面的都是对等方信息
-        interface_section = sections[0]
         peer_sections = sections[1:]
-        
         peers = {}
-        
-        # 处理每个对等方区块
         for i, peer_section in enumerate(peer_sections):
             lines = peer_section.strip().split("\n")
-            
-            # 第一行应该是 "peer: xxx"
             if not lines or not lines[0].strip().startswith("peer:"):
                 continue
-            
-            # 提取公钥
             peer_line = lines[0].strip()
             current_peer = peer_line.split(":", 1)[1].strip()
-            
-            # 初始化对等方信息
             peers[current_peer] = {
                 "endpoint": "未连接",
                 "allowed_ips": "无",
@@ -1006,20 +1029,15 @@ def get_all_peers_status(interface):
                 "active": False,  # 默认为非活跃
                 "status": "disconnected"  # 默认为断开连接
             }
-            
-            # 处理对等方的属性行
             for j in range(1, len(lines)):
                 line = lines[j].strip()
-                
                 if ":" in line:
                     parts = line.split(":", 1)
                     key = parts[0].strip()
                     value = parts[1].strip() if len(parts) > 1 else ""
-                    
                     if key == "endpoint":
                         peers[current_peer]["endpoint"] = value
                     elif key == "allowed ips":
-                        # 保存完整的allowed ips字符串
                         peers[current_peer]["allowed_ips"] = value
                     elif key == "latest handshake":
                         peers[current_peer]["latest_handshake"] = value
@@ -1027,14 +1045,20 @@ def get_all_peers_status(interface):
                         handshake_timestamp = parse_handshake_time(value)
                         peers[current_peer]["handshake_timestamp"] = handshake_timestamp
                         peers[current_peer]["last_handshake_timestamp"] = handshake_timestamp
-                        
-                        # 如果最近150秒内有握手，则标记为活跃
                         now = time.time()
-                        if handshake_timestamp > 0 and (now - handshake_timestamp) <= 150:
-                            peers[current_peer]["active"] = True
-                            peers[current_peer]["status"] = "active"
+                        # 只要有 handshake 就显示所有状态
+                        if handshake_timestamp > 0:
+                            # 150秒内为活跃，加绿色
+                            if (now - handshake_timestamp) <= 150:
+                                peers[current_peer]["active"] = True
+                                peers[current_peer]["status"] = "active"
+                            else:
+                                peers[current_peer]["active"] = False
+                                peers[current_peer]["status"] = "inactive"
+                        else:
+                            peers[current_peer]["active"] = False
+                            peers[current_peer]["status"] = "disconnected"
                     elif key == "transfer":
-                        # 解析传输信息
                         parts = value.split(",")
                         if len(parts) >= 2:
                             rx_part = parts[0].strip()
@@ -1045,12 +1069,12 @@ def get_all_peers_status(interface):
                             peers[current_peer]["transfer_tx"] = tx_value 
                             peers[current_peer]["rx"] = rx_value 
                             peers[current_peer]["tx"] = tx_value
-        
-        # 只保留重要的摘要信息
-        active_count = sum(1 for v in peers.values() if v["active"])
-        print(f"接口 {interface} 上找到 {len(peers)} 个对等方，其中 {active_count} 个活跃")
+        # active_count = sum(1 for v in peers.values() if v["active"])
+        # print(f"接口 {interface} 上找到 {len(peers)} 个对等方，其中 {active_count} 个活跃")
+        # print("所有peer状态总览：")
+        # for k, v in peers.items():
+        #     print(f"  公钥: {k[:8]}...  tx: {v['tx']}  rx: {v['rx']}  last_handshake: {v['latest_handshake']}")
         return peers
-        
     except Exception as e:
         print(f"获取所有对等方状态出错: {e}")
         import traceback
