@@ -18,7 +18,7 @@ WG_CONF_DIR = "/etc/wireguard"
 os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
 
 def init_db():
-    """初始化数据库，创建必要的表和列"""
+    """Initialize the database and create necessary tables/columns"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
@@ -39,14 +39,14 @@ def init_db():
         c.execute("SELECT status FROM clients LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'active'")
-        print("已添加 status 列到 clients 表")
+        print("Added 'status' column to clients table")
     
     conn.commit()
     conn.close()
-    print("数据库初始化完成")
+    print("Database initialized")
 
 def populate_existing_clients():
-    """从WireGuard配置和现有客户端配置文件填充数据库"""
+    """Populate database from WireGuard config and existing client config files"""
     # First populate from WireGuard interfaces
     interfaces = get_wg_interfaces()
     conn = sqlite3.connect(DB_PATH)
@@ -198,17 +198,13 @@ def get_existing_peer_ips(wg_if):
 
 @app.before_request
 def before_request_func():
-    """确保应用只初始化一次"""
+    """Ensure the app is initialized only once"""
     if not getattr(app, 'initialized', False):
-        # 确保目录存在
         os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
-        # 初始化数据库
-        init_db()  
-        # 填充现有客户端
+        init_db()
         populate_existing_clients()
-        # 标记应用已初始化
         app.initialized = True
-        print("应用初始化完成")
+        print("App initialization completed")
 
 @app.route('/gen_server_key')
 def gen_server_key():
@@ -217,7 +213,7 @@ def gen_server_key():
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    # ----------- 新增：服务端配置Tab相关变量 -----------
+    # ----------- Server config section -----------
     server_configs = []
     if os.path.exists(WG_CONF_DIR):
         server_configs = [f for f in os.listdir(WG_CONF_DIR) if f.endswith('.conf')]
@@ -232,30 +228,30 @@ def index():
     default_conf = """[Interface]
 Address = 10.0.0.1/24
 ListenPort = 51820
-PrivateKey = # 请手动生成或用 wg genkey
+PrivateKey = # Please generate manually or use wg genkey
 #PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; sysctl -w net.ipv4.ip_forward=1
 #PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 """
-    # ----------- 新增：服务端配置Tab相关POST处理 -----------
+    # ----------- Server config POST handling -----------
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'create_server_conf':
             filename = request.form.get('filename', 'wg0.conf').strip()
             conf_content = request.form.get('conf_content', '').strip()
             if not filename.endswith('.conf'):
-                flash('文件名必须以 .conf 结尾', 'danger')
+                flash('Filename must end with .conf', 'danger')
             elif not conf_content:
-                flash('配置内容不能为空', 'danger')
+                flash('Config content cannot be empty', 'danger')
             else:
                 conf_path = os.path.join(WG_CONF_DIR, filename)
                 try:
                     os.makedirs(WG_CONF_DIR, exist_ok=True)
                     with open(conf_path, 'w') as f:
                         f.write(conf_content)
-                    flash(f'服务端配置文件 {filename} 已保存！', 'success')
+                    flash(f'Server config file {filename} saved!', 'success')
                     return redirect(url_for('index', edit_conf=filename))
                 except Exception as e:
-                    flash(f'保存配置文件失败: {e}', 'danger')
+                    flash(f'Failed to save config file: {e}', 'danger')
         elif action == 'edit_server_conf':
             filename = request.form.get('filename')
             conf_content = request.form.get('conf_content', '')
@@ -263,19 +259,19 @@ PrivateKey = # 请手动生成或用 wg genkey
             try:
                 with open(conf_path, 'w') as f:
                     f.write(conf_content)
-                flash(f'配置文件 {filename} 已保存！', 'success')
+                flash(f'Config file {filename} saved!', 'success')
                 return redirect(url_for('index', edit_conf=filename))
             except Exception as e:
-                flash(f'保存配置文件失败: {e}', 'danger')
+                flash(f'Failed to save config file: {e}', 'danger')
         elif action == 'start_server':
             filename = request.form.get('filename')
             if filename:
                 interface = filename.replace('.conf', '')
                 try:
                     subprocess.check_call(['wg-quick', 'up', interface])
-                    flash(f'接口 {interface} 已启动', 'success')
+                    flash(f'Interface {interface} started', 'success')
                 except subprocess.CalledProcessError as e:
-                    flash(f'启动接口 {interface} 失败: {e}', 'danger')
+                    flash(f'Failed to start interface {interface}: {e}', 'danger')
             return redirect(url_for('index', edit_conf=filename))
         elif action == 'restart_server':
             filename = request.form.get('filename')
@@ -284,12 +280,12 @@ PrivateKey = # 请手动生成或用 wg genkey
                 try:
                     subprocess.call(['wg-quick', 'down', interface])
                     subprocess.check_call(['wg-quick', 'up', interface])
-                    flash(f'接口 {interface} 已重启', 'success')
+                    flash(f'Interface {interface} restarted', 'success')
                 except subprocess.CalledProcessError as e:
-                    flash(f'重启接口 {interface} 失败: {e}', 'danger')
+                    flash(f'Failed to restart interface {interface}: {e}', 'danger')
             return redirect(url_for('index', edit_conf=filename))
         else:
-            # ----------- 原有客户端配置生成主流程 -----------
+            # ----------- Client config generation -----------
             name = request.form['name']
             wg_if = request.form['interface']
             allowed_ips = request.form.get('allowed_ips', '')
@@ -297,7 +293,7 @@ PrivateKey = # 请手动生成或用 wg genkey
 
             result = get_server_info(wg_if)
             if not result:
-                flash(f"无法获取接口 {wg_if} 的服务器信息", "danger")
+                flash(f"Failed to get server info for interface {wg_if}", "danger")
                 return redirect(url_for('index'))
 
             if len(result) >= 2:
@@ -305,7 +301,7 @@ PrivateKey = # 请手动生成或用 wg genkey
                 endpoint = selected_endpoint if selected_endpoint else result[1]
                 endpoint_options = result[2] if len(result) >= 3 else []
             else:
-                flash("服务器信息格式无效", "danger")
+                flash("Invalid server info format", "danger")
                 return redirect(url_for('index'))
 
             if ':' not in endpoint:
@@ -313,7 +309,7 @@ PrivateKey = # 请手动生成或用 wg genkey
 
             ip_part = endpoint.split(':')[0]
             if not (re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip_part) or re.match(r'^[a-zA-Z0-9.-]+$', ip_part)):
-                flash(f"端点中的IP地址无效: {ip_part}", "danger")
+                flash(f"Invalid IP address in endpoint: {ip_part}", "danger")
                 return redirect(url_for('index'))
 
             try:
