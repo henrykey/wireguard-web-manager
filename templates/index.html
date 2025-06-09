@@ -14,68 +14,75 @@
     <div class="container mt-4">
         <h1>WireGuard Manager</h1>
 
-        <!-- Server Config Section -->
-        <div class="card mb-4">
-            <div class="card-header">Server Configuration</div>
-            <div class="card-body">
-                {% if not has_server_conf %}
-                <form method="post">
-                    <input type="hidden" name="action" value="create_server_conf">
-                    <div class="mb-3">
-                        <label class="form-label">Config Filename</label>
-                        <input type="text" class="form-control" name="filename" value="wg0.conf" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Config Content</label>
-                        <textarea class="form-control" name="conf_content" id="conf_content" rows="12" required>{{ default_conf }}</textarea>
-                    </div>
-                    <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn">Generate PrivateKey</button>
-                    <button type="submit" class="btn btn-primary">Save Config</button>
-                </form>
-                <script>
-                document.getElementById('gen-key-btn').onclick = function() {
-                    fetch('{{ url_for("gen_server_key") }}')
-                        .then(resp => resp.json())
-                        .then(data => {
-                            let textarea = document.getElementById('conf_content');
-                            textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
-                        });
-                };
-                </script>
-                {% else %}
-                <form method="get" id="select-server-form">
-                    <div class="mb-3">
-                        <label class="form-label">Select Interface Config</label>
-                        <select class="form-select" name="edit_conf" id="edit_conf" onchange="this.form.submit()">
-                            {% for conf in server_configs %}
-                            <option value="{{ conf }}" {% if selected_conf == conf %}selected{% endif %}>{{ conf }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                </form>
-                <form method="post">
-                    <input type="hidden" name="action" value="edit_server_conf">
-                    <input type="hidden" name="filename" value="{{ selected_conf }}">
-                    <div class="mb-3">
-                        <label class="form-label">Edit Config Content</label>
-                        <textarea class="form-control" name="conf_content" id="edit_conf_content" rows="12" required>{{ edit_conf_content }}</textarea>
-                    </div>
-                    <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn-edit">Generate PrivateKey</button>
-                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                    <button type="submit" name="action" value="start_server" class="btn btn-success ms-2">Start Interface</button>
-                    <button type="submit" name="action" value="restart_server" class="btn btn-warning ms-2">Restart Interface</button>
-                </form>
-                <script>
-                document.getElementById('gen-key-btn-edit').onclick = function() {
-                    fetch('{{ url_for("gen_server_key") }}')
-                        .then(resp => resp.json())
-                        .then(data => {
-                            let textarea = document.getElementById('edit_conf_content');
-                            textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
-                        });
-                };
-                </script>
-                {% endif %}
+        <!-- Toggle Server Config Button -->
+        <button class="btn btn-secondary mb-3" type="button" data-bs-toggle="collapse" data-bs-target="#serverConfigSection" aria-expanded="false" aria-controls="serverConfigSection">
+            <i class="bi bi-gear"></i> Show/Hide Server Configuration
+        </button>
+
+        <!-- Server Config Section (Collapsible) -->
+        <div class="collapse" id="serverConfigSection">
+            <div class="card mb-4">
+                <div class="card-header">Server Configuration</div>
+                <div class="card-body">
+                    {% if not has_server_conf %}
+                    <form method="post">
+                        <input type="hidden" name="action" value="create_server_conf">
+                        <div class="mb-3">
+                            <label class="form-label">Config Filename</label>
+                            <input type="text" class="form-control" name="filename" value="wg0.conf" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Config Content</label>
+                            <textarea class="form-control" name="conf_content" id="conf_content" rows="12" required>{{ default_conf }}</textarea>
+                        </div>
+                        <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn">Generate PrivateKey</button>
+                        <button type="submit" class="btn btn-primary">Save Config</button>
+                    </form>
+                    <script>
+                    document.getElementById('gen-key-btn').onclick = function() {
+                        fetch('{{ url_for("gen_server_key") }}')
+                            .then(resp => resp.json())
+                            .then(data => {
+                                let textarea = document.getElementById('conf_content');
+                                textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
+                            });
+                    };
+                    </script>
+                    {% else %}
+                    <form method="get" id="select-server-form">
+                        <div class="mb-3">
+                            <label class="form-label">Select Interface Config</label>
+                            <select class="form-select" name="edit_conf" id="edit_conf" onchange="this.form.submit()">
+                                {% for conf in server_configs %}
+                                <option value="{{ conf }}" {% if selected_conf == conf %}selected{% endif %}>{{ conf }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </form>
+                    <form method="post">
+                        <input type="hidden" name="action" value="edit_server_conf">
+                        <input type="hidden" name="filename" value="{{ selected_conf }}">
+                        <div class="mb-3">
+                            <label class="form-label">Edit Config Content</label>
+                            <textarea class="form-control" name="conf_content" id="edit_conf_content" rows="12" required>{{ edit_conf_content }}</textarea>
+                        </div>
+                        <button type="button" class="btn btn-secondary mb-2" id="gen-key-btn-edit">Generate PrivateKey</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                        <button type="submit" name="action" value="start_server" class="btn btn-success ms-2">Start Interface</button>
+                        <button type="submit" name="action" value="restart_server" class="btn btn-warning ms-2">Restart Interface</button>
+                    </form>
+                    <script>
+                    document.getElementById('gen-key-btn-edit').onclick = function() {
+                        fetch('{{ url_for("gen_server_key") }}')
+                            .then(resp => resp.json())
+                            .then(data => {
+                                let textarea = document.getElementById('edit_conf_content');
+                                textarea.value = textarea.value.replace(/PrivateKey\s*=\s*.*/g, 'PrivateKey = ' + data.private_key);
+                            });
+                    };
+                    </script>
+                    {% endif %}
+                </div>
             </div>
         </div>
 
@@ -197,7 +204,9 @@
                                     <td>{{ client.created_at }}</td>
                                     <td>
                                         <div class="btn-group btn-group-sm" role="group">
-                                            <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#renameModal{{ client.name }}">
+                                            <!-- Modal trigger button -->
+                                            <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" 
+                                                    data-bs-target="#renameModal{{ client.name|replace(' ', '_')|replace('.', '_')|replace('-', '_')|replace('/', '_') }}">
                                                 Rename
                                             </button>
                                             <form action="{{ url_for('toggle_client', name=client.name) }}" method="POST" style="display: inline;">
@@ -220,7 +229,7 @@
                                             </form>
                                         </div>
                                         <!-- Rename Modal -->
-                                        <div class="modal fade" id="renameModal{{ client.name }}" tabindex="-1" aria-hidden="true">
+                                        <div class="modal fade" id="renameModal{{ client.name|replace(' ', '_')|replace('.', '_')|replace('-', '_')|replace('/', '_') }}" tabindex="-1" aria-hidden="true">
                                             <div class="modal-dialog">
                                                 <div class="modal-content">
                                                     <div class="modal-header">
@@ -266,6 +275,25 @@
                 new bootstrap.Tab(tabTrigger).show();
             }
         }
+
+        // Server config section collapse state management
+        document.addEventListener('DOMContentLoaded', function() {
+            const serverConfigSection = document.getElementById('serverConfigSection');
+            const showConfig = localStorage.getItem('showServerConfig') === 'true';
+            
+            if (showConfig) {
+                serverConfigSection.classList.add('show');
+            }
+            
+            // Save preference when toggled
+            serverConfigSection.addEventListener('shown.bs.collapse', function() {
+                localStorage.setItem('showServerConfig', 'true');
+            });
+            
+            serverConfigSection.addEventListener('hidden.bs.collapse', function() {
+                localStorage.setItem('showServerConfig', 'false');
+            });
+        });
     </script>
 </body>
 </html>
