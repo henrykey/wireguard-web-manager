@@ -5,7 +5,7 @@ import re
 import subprocess
 import os
 import tempfile
-from flask import Flask, render_template, request, send_file, redirect, url_for, flash
+from flask import Flask, render_template, request, send_file, redirect, url_for, flash, session
 import qrcode
 from io import BytesIO
 import base64
@@ -155,7 +155,7 @@ def populate_existing_clients():
     print("[INFO] Client population completed")
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # for flashing messages
+app.secret_key = 'supersecretkey'  # for flashing messages and session
 
 def get_wg_interfaces():
     output = subprocess.check_output(["wg", "show", "interfaces"]).decode().strip()
@@ -226,11 +226,6 @@ def index():
     has_server_conf = bool(server_configs)
     selected_conf = request.args.get('edit_conf') or (server_configs[0] if server_configs else None)
     edit_conf_content = ""
-    if selected_conf:
-        conf_path = os.path.join(WG_CONF_DIR, selected_conf)
-        if os.path.exists(conf_path):
-            with open(conf_path, 'r') as f:
-                edit_conf_content = f.read()
     default_conf = """[Interface]
 Address = 10.0.0.1/24
 ListenPort = 51820
@@ -277,19 +272,50 @@ PrivateKey = # Please generate manually or use wg genkey
                 try:
                     subprocess.check_call(['wg-quick', 'up', interface])
                     flash(f'Interface {interface} started', 'success')
+                    # 存储状态信息到会话
+                    session['server_status'] = {
+                        'interface': interface,
+                        'message': f'{interface} started successfully',
+                        'status': 'success',
+                        'timestamp': time.time()
+                    }
                 except subprocess.CalledProcessError as e:
-                    flash(f'Failed to start interface {interface}: {e}', 'danger')
+                    error_output = str(e.output) if hasattr(e, 'output') else str(e)
+                    flash(f'Failed to start interface {interface}: {error_output}', 'danger')
+                    # 存储错误状态到会话
+                    session['server_status'] = {
+                        'interface': interface,
+                        'message': f'Failed to start {interface}',
+                        'status': 'danger',
+                        'timestamp': time.time()
+                    }
             return redirect(url_for('index', edit_conf=filename))
         elif action == 'restart_server':
             filename = request.form.get('filename')
             if filename:
                 interface = filename.replace('.conf', '')
                 try:
+                    # 先停止接口
                     subprocess.call(['wg-quick', 'down', interface])
+                    # 启动接口
                     subprocess.check_call(['wg-quick', 'up', interface])
                     flash(f'Interface {interface} restarted', 'success')
+                    # 存储状态信息到会话
+                    session['server_status'] = {
+                        'interface': interface,
+                        'message': f'{interface} restarted successfully', 
+                        'status': 'success',
+                        'timestamp': time.time()
+                    }
                 except subprocess.CalledProcessError as e:
-                    flash(f'Failed to restart interface {interface}: {e}', 'danger')
+                    error_output = str(e.output) if hasattr(e, 'output') else str(e)
+                    flash(f'Failed to restart interface {interface}: {error_output}', 'danger')
+                    session['server_status'] = {
+                        'interface': interface,
+                        'message': f'Failed to restart {interface}',
+                        'status': 'danger',
+                        'timestamp': time.time()
+                    }
             return redirect(url_for('index', edit_conf=filename))
         else:
             # ----------- Client config generation -----------
@@ -520,6 +546,37 @@ PersistentKeepalive = 25
     clients_with_status.sort(key=sort_key)
 
     # ----------- Render template -----------
+    server_status = session.get('server_status', None)
+    # 60秒后清除状态消息
+    if server_status and time.time() - server_status.get('timestamp', 0) > 60:
+        session.pop('server_status', None)
+        server_status = None
+
+    # 如果没有临时状态，则获取当前接口状态
+    if not server_status and selected_conf:
+        interface = selected_conf.replace('.conf', '')
+        server_status = get_interface_status(interface)
+
+    # 在渲染模板前检查 selected_conf 是否为 'add_new'
+    if selected_conf == 'add_new':
+        # 提供默认配置内容
+        edit_conf_content = default_conf
+        # 将表单指向创建新配置的动作
+        form_action = 'create_server_conf'
+    else:
+        # 加载现有配置文件内容
+        if selected_conf:
+            conf_path = os.path.join(WG_CONF_DIR, selected_conf)
+            if os.path.exists(conf_path):
+                try:
+                    with open(conf_path, 'r') as f:
+                        edit_conf_content = f.read()
+                    print(f"Loaded config content, length: {len(edit_conf_content)}")
+                except Exception as e:
+                    print(f"Error loading config file: {e}")
+                    flash(f"Error loading config: {e}", "danger")
+        form_action = 'edit_server_conf'
+
     return render_template('index.html',
         has_server_conf=has_server_conf,
         server_configs=server_configs,
@@ -530,8 +587,9 @@ PersistentKeepalive = 25
         interfaces=interfaces,
         selected_interface=selected_interface,
         endpoint_options=endpoint_options,
-        clients=clients_with_status,  # Sorted client list
-        # ...other template variables...
+        clients=clients_with_status,
+        server_status=server_status,  # 新增此行
+        form_action=form_action  # 新增此行
     )
 
 @app.route('/download/<filename>')
@@ -1086,6 +1144,20 @@ def get_all_peers_status(interface):
         import traceback
         print(traceback.format_exc())
         return {}
+
+def get_interface_status(interface):
+    """获取 WireGuard 接口的当前状态"""
+    try:
+        # 检查接口是否存在
+        output = subprocess.check_output(['wg', 'show', interface], stderr=subprocess.STDOUT).decode().strip()
+        return {'status': 'success', 'message': f'{interface} (Running)'}
+    except subprocess.CalledProcessError:
+        # 接口未运行
+        if os.path.exists(os.path.join(WG_CONF_DIR, f"{interface}.conf")):
+            return {'status': 'warning', 'message': f'{interface} (Not Running)'}
+        else:
+            return {'status': 'danger', 'message': f'{interface} (Not Configured)'}
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=True)
