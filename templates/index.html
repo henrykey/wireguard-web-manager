@@ -169,7 +169,7 @@
                     </div>
                     <div class="mb-3">
                       <label for="interface" class="form-label">WireGuard Interface</label>
-                      <select class="form-select" name="interface" id="interface">
+                      <select class="form-select" name="interface" id="interface" onchange="switchInterface(this.value)">
                         {% for iface in interfaces %}
                           <option value="{{ iface }}" {% if selected_interface == iface %}selected{% endif %}>{{ iface }}</option>
                         {% endfor %}
@@ -234,7 +234,8 @@
                     </form>
                   </div>
                   <div>
-                    <form action="{{ url_for('sync_wg_clients') }}" method="POST" style="display: inline;">
+                    <form action="{{ url_for('sync_wg_clients') }}" method="POST">
+                      <input type="hidden" name="current_interface" value="{{ selected_interface }}">
                       <button type="submit" class="btn btn-warning btn-sm">
                         Sync WireGuard Status
                       </button>
@@ -378,6 +379,24 @@
                 localStorage.setItem('showServerConfig', 'false');
             });
         });
+
+        function switchInterface(interface) {
+            // 创建表单用于提交
+            const form = document.createElement('form');
+            form.method = 'GET';
+            form.action = '{{ url_for("index") }}';
+            
+            // 创建接口输入
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'interface';
+            input.value = interface;
+            
+            // 添加输入到表单并提交
+            form.appendChild(input);
+            document.body.appendChild(form);
+            form.submit();
+        }
     </script>
 </body>
 </html>

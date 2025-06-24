@@ -887,8 +887,10 @@ def show_qr(name):
     
     return render_template('qr.html', name=name, qr_base64=client[0])
 
-@app.route('/sync', methods=['GET', 'POST'])
+@app.route('/sync', methods=['POST'])
 def sync_wg_clients():
+    current_interface = request.form.get('current_interface')
+    
     """Synchronize WireGuard status with database
     
     Priority:
@@ -1052,7 +1054,11 @@ def sync_wg_clients():
         print(traceback.format_exc())
         flash(f"Error during synchronization: {str(e)}", "danger")
     
-    return redirect(url_for('index'))
+    # 重定向时保留接口选择
+    if current_interface:
+        return redirect(url_for('index', interface=current_interface))
+    else:
+        return redirect(url_for('index'))
 
 def get_all_peers_status(interface):
     """Get status of all peers on specified interface at once"""
