@@ -358,24 +358,13 @@ PrivateKey = # Please generate manually or use wg genkey
                 subnet = '.'.join(ip_part.split('.')[:3])
 
             ip_last_octet = request.form.get('ip_last_octet', '').strip()
-            used_ips = get_existing_peer_ips(wg_if)
-            client_ip = None
+            # Allocate an IP address for the client
+            client_ip = allocate_client_ip(wg_if, ip_last_octet)
 
-            if ip_last_octet and ip_last_octet.isdigit():
-                candidate = f"{subnet}.{ip_last_octet}"
-                if candidate in used_ips:
-                    flash(f"IP {candidate} is already in use", "danger")
-                    return redirect(url_for('index'))
-                client_ip = f"{candidate}/32"
-            else:
-                for i in range(2, 255):
-                    candidate = f"{subnet}.{i}"
-                    if candidate not in used_ips:
-                        client_ip = f"{candidate}/32"
-                        break
-                if not client_ip:
-                    flash("No available IP addresses in subnet", "danger")
-                    return redirect(url_for('index'))
+            if not client_ip:
+                flash("Failed to allocate a unique IP address", "danger")
+                return redirect(url_for('index'))
+
 
             try:
                 privkey, pubkey = generate_keys()
@@ -1158,6 +1147,92 @@ def get_interface_status(interface):
         else:
             return {'status': 'danger', 'message': f'{interface} (Not Configured)'}
 
+def allocate_client_ip(interface, last_octet=None):
+    """为新客户端分配唯一的 IP 地址，如果指定了 last_octet 则优先使用
+    
+    Args:
+        interface: WireGuard 接口名称
+        last_octet: 可选，用户指定的 IP 地址最后一个数字
+        
+    Returns:
+        分配的客户端 IP 地址，格式为 "IP/掩码"，如果无法分配则返回 None
+    """
+    # 获取服务器 IP 和网络范围
+    conf_path = os.path.join(WG_CONF_DIR, f"{interface}.conf")
+    if not os.path.exists(conf_path):
+        print(f"接口配置文件不存在: {conf_path}")
+        return None
+    
+    # 解析服务器配置
+    server_ip = None
+    netmask = "24"  # 默认掩码
+    try:
+        with open(conf_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('Address'):
+                    server_ip = line.split('=')[1].strip()
+                    break
+    except Exception as e:
+        print(f"读取服务器配置错误: {e}")
+        return None
+    
+    if not server_ip:
+        print(f"无法从配置中获取服务器 IP")
+        return "10.0.0.2/24"  # 使用默认值
+    
+    # 解析服务器 IP 和网络
+    ip_parts = server_ip.split('/')
+    base_ip = ip_parts[0]
+    if len(ip_parts) > 1:
+        netmask = ip_parts[1]
+    
+    # 解析基础 IP
+    base_octets = base_ip.split('.')
+    if len(base_octets) != 4:
+        print(f"服务器 IP 格式不正确: {base_ip}")
+        return None
+        
+    base_network = '.'.join(base_octets[:3])  # 例如 10.0.0
+    
+    # 获取已使用的 IP 地址
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    used_ips = []
+    try:
+        for row in c.execute('SELECT ip FROM clients WHERE interface = ?', (interface,)):
+            if row[0]:
+                ip = row[0]
+                if '/' in ip:
+                    ip = ip.split('/')[0]  # 移除 CIDR 部分
+                used_ips.append(ip)
+    except Exception as e:
+        print(f"查询数据库错误: {e}")
+    finally:
+        conn.close()
+    
+    print(f"当前接口 {interface} 已使用 IP: {used_ips}")
+    
+    # 检查用户指定的 IP 是否可用
+    if last_octet and last_octet.isdigit():
+        octet = int(last_octet)
+        if 2 <= octet <= 254:  # 避开特殊地址
+            candidate_ip = f"{base_network}.{octet}"
+            if candidate_ip not in used_ips and candidate_ip != base_ip:
+                print(f"使用用户指定的 IP: {candidate_ip}/{netmask}")
+                return f"{candidate_ip}/{netmask}"
+            else:
+                print(f"指定的 IP {candidate_ip} 已被使用或无效")
+    
+    # 如果没有指定 IP 或指定的 IP 不可用，自动分配
+    for i in range(2, 254):  # 避开 .1 (通常是服务器)
+        candidate_ip = f"{base_network}.{i}"
+        if candidate_ip not in used_ips and candidate_ip != base_ip:
+            print(f"自动分配 IP: {candidate_ip}/{netmask}")
+            return f"{candidate_ip}/{netmask}"
+    
+    print("无可用 IP 地址")
+    return None
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8088, debug=True)
