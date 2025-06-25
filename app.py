@@ -175,13 +175,31 @@ def get_server_info(wg_if):
             with open(conf_path, 'r') as f:
                 for line in f:
                     if line.strip().startswith("# endpoint:"):
-                        endpoint_line = line.strip().split(":", 1)[1].strip()
+                        endpoint_line = line.strip()[len("# endpoint:"):].strip()
                         endpoints.append(endpoint_line)
+                        print(f"Found endpoint in config: {endpoint_line}")
+        
+        # 添加自动检测的 IP+端口 作为选项
+        auto_endpoint = f"{ip}:{port}"
+        endpoints.append(f"auto:{auto_endpoint}")
+        
+        # 尝试获取公网 IP 地址
+        try:
+            public_ip = subprocess.check_output(['curl', '-s', 'https://api.ipify.org']).decode().strip()
+            if public_ip and public_ip != ip:
+                public_endpoint = f"{public_ip}:{port}"
+                endpoints.append(f"public:{public_endpoint}")
+        except:
+            pass
+            
         if endpoints:
-            return pubkey, endpoints[0], endpoints
+            # 第一个实际的 endpoint 地址
+            first_real_endpoint = endpoints[0].split(":", 1)[1] if ":" in endpoints[0] else endpoints[0]
+            return pubkey, first_real_endpoint, endpoints
         else:
-            return pubkey, f"{ip}:{port}", [f"{ip}:{port}"]
-    except subprocess.CalledProcessError:
+            return pubkey, f"{ip}:{port}", [f"auto:{ip}:{port}"]
+    except subprocess.CalledProcessError as e:
+        print(f"Error in get_server_info: {e}")
         return None, None, []
 
 def generate_keys():
@@ -444,12 +462,14 @@ PersistentKeepalive = 25
     interfaces = get_wg_interfaces()
     selected_interface = request.args.get('interface', interfaces[0] if interfaces else None)
     endpoint_options = []
-    if interfaces:
+    if selected_interface:
         try:
-            server_info = get_server_info(interfaces[0])
+            server_info = get_server_info(selected_interface)
             if server_info and len(server_info) == 3:
                 _, _, endpoint_options = server_info
-        except Exception:
+            print(f"Found endpoint options for {selected_interface}: {endpoint_options}")
+        except Exception as e:
+            print(f"Error getting endpoint options: {e}")
             endpoint_options = []
 
     # ----------- New: Generate clients_with_status -----------

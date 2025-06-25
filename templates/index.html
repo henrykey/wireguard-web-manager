@@ -188,18 +188,24 @@
                       <label for="endpoint_select" class="form-label">Server Endpoint</label>
                       <select class="form-select" id="endpoint_select" name="selected_endpoint">
                         {% for ep in endpoint_options %}
-                          <option value="{{ ep }}">{{ ep }}</option>
+                          {% if ep.startswith('auto:') %}
+                            <option value="{{ ep[5:] }}">Auto ({{ ep[5:] }})</option>
+                          {% elif ep.startswith('public:') %}
+                            <option value="{{ ep[7:] }}">Public IP ({{ ep[7:] }})</option>
+                          {% else %}
+                            <option value="{{ ep }}">{{ ep }}</option>
+                          {% endif %}
                         {% endfor %}
-                        <option value="">Manual Input</option>
+                        <option value="custom">Custom...</option>
                       </select>
-                      <input type="text" class="form-control mt-2" name="manual_endpoint" id="manual_endpoint" placeholder="e.g. 1.2.3.4:51820" style="display:none;">
+                      <input type="text" class="form-control mt-2" name="custom_endpoint" id="custom_endpoint" placeholder="e.g. 1.2.3.4:51820" style="display:none;">
                     </div>
                     <script>
                     document.getElementById('endpoint_select').onchange = function() {
-                        if(this.value === "") {
-                            document.getElementById('manual_endpoint').style.display = '';
+                        if(this.value === "custom") {
+                            document.getElementById('custom_endpoint').style.display = '';
                         } else {
-                            document.getElementById('manual_endpoint').style.display = 'none';
+                            document.getElementById('custom_endpoint').style.display = 'none';
                         }
                     };
                     </script>
