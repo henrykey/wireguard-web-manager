@@ -440,7 +440,9 @@ PersistentKeepalive = 25
                 return redirect(url_for('index'))
 
             try:
-                subprocess.call(["wg", "set", wg_if, "peer", pubkey, "allowed-ips", client_ip])
+                # 向 WireGuard 添加 peer，只使用客户端 IP 作为 allowed-ips
+                client_ip_only = client_ip.split('/')[0] + "/32"  # 确保使用 /32 格式
+                subprocess.call(["wg", "set", wg_if, "peer", pubkey, "allowed-ips", client_ip_only])
             except Exception as e:
                 flash(f"Error applying WireGuard config: {str(e)}", "danger")
 
@@ -948,11 +950,22 @@ def sync_wg_clients():
                         # Extract IP address
                         peer_ip = None
                         if allowed_ips:
-                            for ip_cidr in allowed_ips.split(','):
+                            allowed_ip_list = allowed_ips.split(',')
+                            for ip_cidr in allowed_ip_list:
                                 ip_cidr = ip_cidr.strip()
                                 if '/' in ip_cidr:
-                                    peer_ip = ip_cidr
-                                    break
+                                    # 跳过 0.0.0.0/0 和 ::/0 这类路由
+                                    if ip_cidr == "0.0.0.0/0" or ip_cidr == "::/0":
+                                        continue
+                                    
+                                    # 首选 /32 的地址，这通常是客户端真正的 IP
+                                    if ip_cidr.endswith('/32'):
+                                        peer_ip = ip_cidr
+                                        break
+                                    
+                                    # 如果没找到 /32，使用第一个非路由的 IP
+                                    if not peer_ip:
+                                        peer_ip = ip_cidr
                         
                         # Determine active status
                         active = latest_handshake > 0 and (time.time() - latest_handshake) < 600  # Active within 10 minutes
