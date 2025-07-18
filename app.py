@@ -538,9 +538,20 @@ PersistentKeepalive = 25
             status['active'] = False
             status['endpoint'] = 'Paused'
             status['last_seen'] = 'Paused'
+        # 优先使用WireGuard中的IP，如果没有则使用数据库中的IP
+        display_ip = ip.split('/')[0] if '/' in ip else ip  # 默认使用数据库IP
+        if status.get("allowed_ips") and status["allowed_ips"] != "None":
+            # 从WireGuard的allowed_ips中提取客户端IP
+            allowed_ips_str = status["allowed_ips"]
+            if '/' in allowed_ips_str:
+                # 如果包含CIDR，提取IP部分
+                wg_ip = allowed_ips_str.split('/')[0]
+                if wg_ip and wg_ip != "0.0.0.0" and not wg_ip.startswith("::"):
+                    display_ip = wg_ip
+        
         clients_with_status.append({
             "name": name,
-            "wg_ip": ip.split('/')[0] if '/' in ip else ip,
+            "wg_ip": display_ip,
             "interface": interface,
             "created_at": created_at,
             "qr_base64": qr_base64,
@@ -1024,10 +1035,22 @@ def sync_wg_clients():
                     updates.append("interface = ?")
                     params.append(peer_info["interface"])
                 
-                # If IP has changed
-                if peer_info["ip"] and db_ip != peer_info["ip"]:
-                    updates.append("ip = ?")
-                    params.append(peer_info["ip"])
+                # If IP has changed or IP format is invalid
+                db_ip_clean = db_ip.split('/')[0] if '/' in db_ip else db_ip
+                if peer_info["ip"]:
+                    peer_ip_clean = peer_info["ip"].split('/')[0] if '/' in peer_info["ip"] else peer_info["ip"]
+                    
+                    # 检查数据库IP是否不合规（如网络地址xxx.xxx.xxx.0）
+                    # 网络地址通常以.0结尾，但排除特殊地址如127.0.0.1, 0.0.0.0等
+                    is_invalid_ip = (db_ip_clean.endswith('.0') and 
+                                   not db_ip_clean.endswith('.0.0') and 
+                                   not db_ip_clean in ['127.0.0.1', '0.0.0.0', '192.168.1.0'] and
+                                   not db_ip_clean.startswith('169.254.'))
+                    
+                    if db_ip_clean != peer_ip_clean or is_invalid_ip:
+                        updates.append("ip = ?")
+                        params.append(peer_ip_clean)  # 存储纯IP，不带CIDR
+                        print(f"IP updated for client {name}: {db_ip_clean} -> {peer_ip_clean}")
                 
                 # If previously paused, now active
                 if status == 'paused':
@@ -1053,6 +1076,9 @@ def sync_wg_clients():
         # Add peers that exist in WireGuard but not in database
         for pubkey, peer_info in wg_peers.items():
             if peer_info["ip"]:  # Ensure there's an IP address
+                # 确保存储的是纯IP地址，不带CIDR
+                clean_ip = peer_info["ip"].split('/')[0] if '/' in peer_info["ip"] else peer_info["ip"]
+                
                 # Create a unique name for new peer
                 base_name = f"peer_{pubkey[:6]}"
                 new_name = base_name
@@ -1064,10 +1090,10 @@ def sync_wg_clients():
                 # Add to database
                 c.execute(
                     'INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
-                    (new_name, peer_info["interface"], peer_info["ip"], pubkey, 'active')
+                    (new_name, peer_info["interface"], clean_ip, pubkey, 'active')
                 )
                 added += 1
-                print(f"Added new client {new_name}")
+                print(f"Added new client {new_name} with IP {clean_ip}")
         
         conn.commit()
         conn.close()
