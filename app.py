@@ -398,10 +398,13 @@ PrivateKey = # Please generate manually or use wg genkey
                 if subnet_net not in user_ips:
                     allowed_ips += f", {subnet_net}"
 
+            # 确保客户端IP地址使用/32掩码
+            client_ip_address = client_ip.split('/')[0] + "/32"
+            
             conf_content = f"""
 [Interface]
 PrivateKey = {privkey}
-Address = {client_ip}
+Address = {client_ip_address}
 DNS = 1.1.1.1,8.8.4.4
 MTU = 1280
 
@@ -449,10 +452,12 @@ PersistentKeepalive = 25
             try:
                 server_conf_path = os.path.join(WG_CONF_DIR, f"{wg_if}.conf")
                 if os.path.exists(server_conf_path):
+                    # 确保服务器配置中的AllowedIPs使用/32掩码
+                    server_allowed_ips = client_ip.split('/')[0] + "/32"
                     with open(server_conf_path, 'a') as f:
                         if not any("# endpoint:" in line for line in open(server_conf_path)):
                             f.write(f"\n# endpoint: {endpoint}\n")
-                        f.write(f"\n# Client {name}\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {client_ip}\n")
+                        f.write(f"\n# Client {name}\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {server_allowed_ips}\n")
             except Exception as e:
                 flash(f"Error updating server config file: {str(e)}", "danger")
 
@@ -882,8 +887,8 @@ def toggle_client(name):
             flash(f"Client {name} connection paused.", "success")
         else:
             # Re-enable by adding peer back
-            client_ip = ip if '/' in ip else f"{ip}/32"
-            subprocess.call(['wg', 'set', interface, 'peer', pubkey, 'allowed-ips', client_ip])
+            client_ip_only = ip.split('/')[0] + "/32"  # 确保使用/32格式
+            subprocess.call(['wg', 'set', interface, 'peer', pubkey, 'allowed-ips', client_ip_only])
             # Update status in database
             c.execute('UPDATE clients SET status = ? WHERE name = ?', ('active', name))
             flash(f"Client {name} connection resumed.", "success")
