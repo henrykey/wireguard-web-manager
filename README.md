@@ -1,36 +1,46 @@
-# WireGuard Web 管理器
+# WireGuard Web Manager
 
-WireGuard Web 管理器是一个简单、轻量级的 Web 界面，用于管理 WireGuard VPN 服务器和客户端。它提供了直观的界面来添加、删除和管理 WireGuard 客户端，显示连接状态，并生成客户端配置。
+[![Version](https://img.shields.io/badge/version-v1.2.0-blue.svg)](https://github.com/henrykey/wireguard-web-manager/releases)
+[![Docker](https://img.shields.io/badge/docker-supported-green.svg)](https://hub.docker.com)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## 功能特点
+WireGuard Web Manager is a simple, lightweight web interface for managing WireGuard VPN servers and clients. It provides an intuitive interface to add, remove, and manage WireGuard clients, display connection status, and generate client configurations.
 
-- 通过 Web 界面管理 WireGuard 客户端
-- 可折叠的服务器配置界面，简化操作
-- 显示服务器接口状态和运行状态
-- 支持创建和管理多个 WireGuard 接口
-- 显示客户端连接状态和数据传输统计
-- 生成客户端配置文件和 QR 码
-- 按最后连接时间对客户端进行排序
-- 支持暂停和恢复客户端
-- 可以在容器内或容器外运行 WireGuard 服务
+[中文文档](README.ZH.md) | [English Documentation](README.md)
 
-## 安装和部署
+## Features
 
-### 方法 1：使用 Docker（推荐）
+- Manage WireGuard clients through a web interface
+- Collapsible server configuration interface for simplified operations
+- Display server interface status and operational state
+- Support for creating and managing multiple WireGuard interfaces
+- Show client connection status and data transfer statistics
+- Generate client configuration files and QR codes
+- Sort clients by last connection time
+- Support for pausing and resuming clients
+- Automatic IP address allocation with /32 subnet masks
+- Smart sync functionality to correct database inconsistencies
+- Universal private network address validation and correction
+- Priority display using real-time WireGuard data
+- Ability to run WireGuard service inside or outside the container
+
+## Installation and Deployment
+
+### Method 1: Using Docker (Recommended)
 
 ```bash
-# 克隆仓库
-git clone https://github.com/yourusername/wgmanage.git
-cd wgmanage
+# Clone the repository
+git clone https://github.com/henrykey/wireguard-web-manager.git
+cd wireguard-web-manager
 
-# 构建 Docker 镜像
+# Build Docker image
 docker build -t wgmanage .
 ```
 
-运行方式（三种模式）
+Running options (three modes)
 
-1. 管理模式（仅管理主机上的 WireGuard）
-   在这种模式下，容器只提供 Web 管理界面，WireGuard 服务在主机上运行。
+1. Management Mode (only managing WireGuard on the host)
+   In this mode, the container only provides the web management interface, while WireGuard service runs on the host.
 
 ```bash
 docker run -d \
@@ -41,8 +51,8 @@ docker run -d \
   wgmanage
 ```
 
-2. 内部 WireGuard 模式（在容器内运行 WireGuard，但不自动启动）
-   在这种模式下，WireGuard 服务在容器内运行，但需要通过 Web 界面手动启动接口。
+2. Internal WireGuard Mode (running WireGuard inside the container, without auto-start)
+   In this mode, WireGuard service runs inside the container, but interfaces need to be manually started via the web interface.
 
 ```bash
 docker run -d \
@@ -56,8 +66,8 @@ docker run -d \
   wgmanage
 ```
 
-3. 内部 WireGuard 模式（在容器内运行并自动启动）
-   在这种模式下，WireGuard 接口会在容器启动时自动启动。
+3. Internal WireGuard Mode (running inside the container with auto-start)
+   In this mode, WireGuard interfaces will automatically start when the container starts.
 
 ```bash
 docker run -d \
@@ -72,7 +82,7 @@ docker run -d \
   wgmanage
 ```
 
-或者使用命令行参数：
+Or using command line arguments:
 
 ```bash
 docker run -d \
@@ -85,66 +95,79 @@ docker run -d \
   wgmanage /app/start.sh internal autostart
 ```
 
-### 方法 2：直接在主机上运行
+### Method 2: Running Directly on the Host
 ```bash
-# 安装依赖
+# Install dependencies
 pip install -r requirements.txt
 
-# 运行应用
+# Run the application
 python app.py
 ```
 
-## Web 界面使用方法
+## Web Interface Usage
 
-安装完成后，可以通过浏览器访问 http://your-server-ip:8088 来管理 WireGuard：
+After installation, you can access the management interface via browser at http://your-server-ip:8088:
 
-### 服务器管理
+### Server Management
 
-- **服务器配置**: 点击"显示/隐藏服务器配置"按钮可以展开或折叠服务器配置区域
-- **接口状态**: 标题栏旁边会显示接口状态（运行中、未运行或未配置）
-- **创建接口**: 从下拉菜单选择"+ 添加新接口"创建一个新的 WireGuard 接口
-- **启动/重启**: 使用按钮控制接口的运行状态
+- **Server Configuration**: Click the "Show/Hide Server Configuration" button to expand or collapse the server configuration area
+- **Interface Status**: The interface status (running, not running, or not configured) is displayed next to the title bar
+- **Create Interface**: Select "+ Add New Interface" from the dropdown menu to create a new WireGuard interface
+- **Start/Restart**: Use buttons to control the interface's operational state
 
-### 客户端管理
+### Client Management
 
-- **添加客户端**: 填写客户端名称和选择 WireGuard 接口，点击"生成客户端配置"
-- **查看客户端状态**: 在"状态"标签页可以查看所有客户端的连接状态、数据传输量和最后连接时间
-- **管理客户端**: 在"管理"标签页可以重命名、删除、暂停/恢复客户端
-- **下载配置**: 点击"下载配置"获取客户端配置文件
-- **显示二维码**: 点击"显示二维码"，可以使用手机 WireGuard 应用扫描二维码快速配置
+- **Add Client**: Enter the client name, select a WireGuard interface, and click "Generate Client Config"
+- **View Client Status**: In the "Status" tab, view all clients' connection status, data transfer amounts, and last connection time
+- **Manage Clients**: In the "Manage" tab, rename, delete, pause/resume clients
+- **Download Configuration**: Click "Download Config" to get the client configuration file
+- **Display QR Code**: Click "Show QR Code" to quickly configure using the WireGuard mobile app by scanning
 
-## 参数说明
+## Parameter Description
 
-- `WIREGUARD_INTERNAL=true`: 启用容器内部 WireGuard 服务
-- `WIREGUARD_AUTOSTART=true`: 自动启动 WireGuard 接口
-- `/app/start.sh internal`: 通过命令行参数启用容器内部 WireGuard 服务
-- `/app/start.sh internal autostart`: 启用容器内部 WireGuard 服务并自动启动接口
+- `WIREGUARD_INTERNAL=true`: Enable internal WireGuard service in container
+- `WIREGUARD_AUTOSTART=true`: Automatically start WireGuard interfaces
+- `/app/start.sh internal`: Enable internal WireGuard service via command line parameter
+- `/app/start.sh internal autostart`: Enable internal WireGuard service and auto-start interfaces
 
-## 注意事项
+## Important Notes
 
-- 容器内运行 WireGuard 需要 `--privileged` 权限或适当的 `--cap-add` 参数
-- 确保 UDP 端口 (如 51820) 在防火墙中开放，以便 WireGuard 客户端能够连接
-- 管理界面应该设置适当的访问控制，避免公开访问
-- 容器中的 WireGuard 配置存储在挂载的卷中 (/etc/wireguard)，请确保数据安全
-- 服务器配置状态会在 60 秒后自动更新
+- Running WireGuard inside the container requires `--privileged` permissions or appropriate `--cap-add` parameters
+- Ensure UDP ports (like 51820) are open in your firewall for WireGuard clients to connect
+- The management interface should have appropriate access controls to prevent public access
+- WireGuard configurations in the container are stored in the mounted volume (/etc/wireguard), ensure data security
+- Server configuration status automatically updates after 60 seconds
 
-## 故障排查
+## Troubleshooting
 
-如果遇到问题，可以检查容器日志：
+If you encounter issues, check the container logs:
 ```bash
 docker logs wgmanager
 ```
-常见问题：
+Common issues:
 
-- WireGuard 接口无法启动：检查容器是否有足够权限（--privileged）
-- 客户端无法连接：检查防火墙和端口映射
-- 同步状态按钮不起作用：确保容器有权限读写 WireGuard 配置
-- 接口配置不显示：检查 /etc/wireguard 目录的挂载和权限
+- WireGuard interface fails to start: Check if the container has sufficient privileges (--privileged)
+- Clients can't connect: Check firewall and port mapping settings
+- Sync status button doesn't work: Ensure the container has permissions to read/write WireGuard configurations
+- Interface configuration doesn't display: Check mounting and permissions of the /etc/wireguard directory
 
-## 贡献与改进
+## Contributions and Improvements
 
-欢迎通过 Issue 和 Pull Request 提供反馈和改进建议。
+Feedback and improvement suggestions are welcome via Issues and Pull Requests.
 
-## 许可证
+## Version History
 
-[MIT 许可证]
+### v1.2.0 (Latest)
+- **Universal IP validation and correction**: Support for detecting and auto-correcting network addresses across all private subnets
+- **Enhanced sync functionality**: Automatically corrects database IP inconsistencies during synchronization  
+- **Improved display logic**: Prioritizes real-time WireGuard data for accurate client IP display
+- **Complete /32 subnet mask support**: Full pipeline support for /32 IP masks in client configs and server AllowedIPs
+- **Smart network address detection**: Automatically identifies and corrects invalid network addresses (ending in .0)
+
+### Previous Versions
+- v1.1.x: Basic IP mask fixes and toggle functionality improvements
+- v1.0.x: Initial release with core WireGuard management features
+
+## License
+
+[MIT License]
