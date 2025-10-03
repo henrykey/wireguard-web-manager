@@ -573,13 +573,10 @@ PersistentKeepalive = 25
         # 优先使用WireGuard中的IP，如果没有则使用数据库中的IP
         display_ip = ip.split('/')[0] if '/' in ip else ip  # 默认使用数据库IP
         if status.get("allowed_ips") and status["allowed_ips"] != "None":
-            # 从WireGuard的allowed_ips中提取客户端IP
-            allowed_ips_str = status["allowed_ips"]
-            if '/' in allowed_ips_str:
-                # 如果包含CIDR，提取IP部分
-                wg_ip = allowed_ips_str.split('/')[0]
-                if wg_ip and wg_ip != "0.0.0.0" and not wg_ip.startswith("::"):
-                    display_ip = wg_ip
+            # 从WireGuard的allowed_ips中提取客户端IP，使用智能提取函数
+            wg_ip = extract_client_ip_from_allowed_ips(status["allowed_ips"])
+            if wg_ip:
+                display_ip = wg_ip
         
         clients_with_status.append({
             "name": name,
