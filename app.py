@@ -995,25 +995,8 @@ def sync_wg_clients():
                         allowed_ips = parts[3] if len(parts) > 3 else None
                         latest_handshake = int(parts[4]) if len(parts) > 4 and parts[4] and parts[4] != "0" else 0
                         
-                        # Extract IP address
-                        peer_ip = None
-                        if allowed_ips:
-                            allowed_ip_list = allowed_ips.split(',')
-                            for ip_cidr in allowed_ip_list:
-                                ip_cidr = ip_cidr.strip()
-                                if '/' in ip_cidr:
-                                    # 跳过 0.0.0.0/0 和 ::/0 这类路由
-                                    if ip_cidr == "0.0.0.0/0" or ip_cidr == "::/0":
-                                        continue
-                                    
-                                    # 首选 /32 的地址，这通常是客户端真正的 IP
-                                    if ip_cidr.endswith('/32'):
-                                        peer_ip = ip_cidr
-                                        break
-                                    
-                                    # 如果没找到 /32，使用第一个非路由的 IP
-                                    if not peer_ip:
-                                        peer_ip = ip_cidr
+                        # Extract IP address using the same logic as populate_existing_clients
+                        peer_ip = extract_client_ip_from_allowed_ips(allowed_ips)
                         
                         # Determine active status
                         active = latest_handshake > 0 and (time.time() - latest_handshake) < 600  # Active within 10 minutes
@@ -1070,7 +1053,8 @@ def sync_wg_clients():
                 # If IP has changed or IP format is invalid
                 db_ip_clean = db_ip.split('/')[0] if '/' in db_ip else db_ip
                 if peer_info["ip"]:
-                    peer_ip_clean = peer_info["ip"].split('/')[0] if '/' in peer_info["ip"] else peer_info["ip"]
+                    # peer_info["ip"] should already be clean from extract_client_ip_from_allowed_ips
+                    peer_ip_clean = peer_info["ip"]
                     
                     # 检查数据库IP是否不合规（如网络地址xxx.xxx.xxx.0）
                     # 网络地址通常以.0结尾，但排除特殊地址如127.0.0.1, 0.0.0.0等
@@ -1108,8 +1092,8 @@ def sync_wg_clients():
         # Add peers that exist in WireGuard but not in database
         for pubkey, peer_info in wg_peers.items():
             if peer_info["ip"]:  # Ensure there's an IP address
-                # 确保存储的是纯IP地址，不带CIDR
-                clean_ip = peer_info["ip"].split('/')[0] if '/' in peer_info["ip"] else peer_info["ip"]
+                # IP should already be clean (no CIDR) from extract_client_ip_from_allowed_ips
+                clean_ip = peer_info["ip"]
                 
                 # Create a unique name for new peer
                 base_name = f"peer_{pubkey[:6]}"
