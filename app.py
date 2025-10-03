@@ -50,6 +50,36 @@ def sanitize_name(name):
     # Only keep letters, numbers, underscores and hyphens
     return re.sub(r'[^a-zA-Z0-9_-]', '', name)
 
+def extract_client_ip_from_allowed_ips(allowed_ips_str):
+    """Extract the most appropriate client IP from allowed-ips string
+    
+    Priority:
+    1. /32 addresses (most likely to be client IPs)
+    2. First non-route address
+    """
+    if not allowed_ips_str:
+        return None
+        
+    allowed_ip_list = allowed_ips_str.split(',')
+    client_ip = None
+    
+    for ip_cidr in allowed_ip_list:
+        ip_cidr = ip_cidr.strip()
+        if '/' in ip_cidr:
+            # Skip route addresses
+            if ip_cidr in ["0.0.0.0/0", "::/0"]:
+                continue
+            
+            # Prefer /32 addresses (client IPs)
+            if ip_cidr.endswith('/32'):
+                return ip_cidr.split('/')[0]  # Return IP without CIDR
+            
+            # If no /32 found yet, use first valid IP as fallback
+            if not client_ip:
+                client_ip = ip_cidr.split('/')[0]
+    
+    return client_ip
+
 def populate_existing_clients():
     """Populate database from WireGuard config and existing client config files"""
     # First populate from WireGuard interfaces
@@ -65,14 +95,16 @@ def populate_existing_clients():
             for line in output.splitlines():
                 parts = line.strip().split()
                 if len(parts) == 2:
-                    pubkey, ip = parts
-                    short_ip = ip.split('/')[0]
-                    existing = c.execute("SELECT COUNT(*) FROM clients WHERE public_key = ?", (pubkey,)).fetchone()[0]
-                    if existing == 0:
-                        name = f"user{i}"
-                        c.execute('INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
-                                  (name, wg_if, short_ip, pubkey, 'active'))
-                        i += 1
+                    pubkey, allowed_ips = parts
+                    # Use intelligent IP extraction instead of simple split
+                    client_ip = extract_client_ip_from_allowed_ips(allowed_ips)
+                    if client_ip:
+                        existing = c.execute("SELECT COUNT(*) FROM clients WHERE public_key = ?", (pubkey,)).fetchone()[0]
+                        if existing == 0:
+                            name = f"user{i}"
+                            c.execute('INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
+                                      (name, wg_if, client_ip, pubkey, 'active'))
+                            i += 1
         except Exception as e:
             print(f"[WARN] Could not parse peers for {wg_if}: {e}")
     
