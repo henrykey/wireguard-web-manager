@@ -1,6 +1,6 @@
 # WireGuard Web Manager
 
-[![Version](https://img.shields.io/badge/version-v1.2.0-blue.svg)](https://github.com/henrykey/wireguard-web-manager/releases)
+[![Version](https://img.shields.io/badge/version-v1.2.1-blue.svg)](https://github.com/henrykey/wireguard-web-manager/releases)
 [![Docker](https://img.shields.io/badge/docker-supported-green.svg)](https://hub.docker.com)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -157,7 +157,14 @@ Feedback and improvement suggestions are welcome via Issues and Pull Requests.
 
 ## Version History
 
-### v1.2.0 (Latest)
+### v1.2.1 (Latest)
+- **Fixed IP extraction logic**: Resolved issues with multi-IP allowed-ips parsing
+- **Unified IP selection**: All components now use the same intelligent IP extraction function
+- **Priority-based selection**: Correctly prioritizes /32 addresses over network ranges
+- **Complete fix coverage**: Fixed populate_existing_clients, sync_wg_clients, and display logic
+- **Improved accuracy**: Correctly handles cases like "192.168.50.0/24,10.23.0.2/32" → selects "10.23.0.2"
+
+### v1.2.0
 - **Universal IP validation and correction**: Support for detecting and auto-correcting network addresses across all private subnets
 - **Enhanced sync functionality**: Automatically corrects database IP inconsistencies during synchronization  
 - **Improved display logic**: Prioritizes real-time WireGuard data for accurate client IP display

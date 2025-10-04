@@ -1,6 +1,6 @@
 # WireGuard Web 管理器
 
-[![Version](https://img.shields.io/badge/version-v1.2.0-blue.svg)](https://github.com/henrykey/wireguard-web-manager/releases)
+[![Version](https://img.shields.io/badge/version-v1.2.1-blue.svg)](https://github.com/henrykey/wireguard-web-manager/releases)
 [![Docker](https://img.shields.io/badge/docker-supported-green.svg)](https://hub.docker.com)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -157,7 +157,14 @@ docker logs wgmanager
 
 ## 版本历史
 
-### v1.2.0（最新版本）
+### v1.2.1（最新版本）
+- **修复IP提取逻辑**：解决多IP的allowed-ips解析问题
+- **统一IP选择逻辑**：所有组件现在使用相同的智能IP提取函数
+- **优先级选择**：正确优先选择/32地址而非网络范围
+- **全面修复覆盖**：修复了初始扫描、同步和显示逻辑
+- **提高准确性**：正确处理"192.168.50.0/24,10.23.0.2/32"等情况 → 选择"10.23.0.2"
+
+### v1.2.0
 - **通用IP验证和修正**：支持检测并自动修正所有私网段的网络地址
 - **增强同步功能**：同步时自动修正数据库IP不一致问题  
 - **改进显示逻辑**：优先使用WireGuard实时数据显示准确的客户端IP
