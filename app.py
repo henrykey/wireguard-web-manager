@@ -45,6 +45,78 @@ def init_db():
     conn.close()
     print("Database initialized")
 
+def fix_corrupted_client_ips_from_configs():
+    """从客户端配置文件中修复数据库中的错误IP地址
+    
+    检测数据库中所有以 .0 结尾的IP（网络地址）并从对应的配置文件中读取正确的IP
+    """
+    if not os.path.exists(CLIENT_OUTPUT_DIR):
+        print(f"[INFO] Client config directory does not exist: {CLIENT_OUTPUT_DIR}")
+        return 0
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    fixed = 0
+    errors = []
+    
+    try:
+        # 获取所有客户端记录
+        clients = c.execute('SELECT id, name, ip FROM clients').fetchall()
+        
+        for client_id, name, db_ip in clients:
+            # 检查是否是错误的IP（以.0结尾，表示网络地址）
+            if not db_ip:
+                continue
+                
+            ip_clean = db_ip.split('/')[0] if '/' in db_ip else db_ip
+            
+            # 检测网络地址特征
+            is_network_address = ip_clean.endswith('.0') and not ip_clean.endswith('.0.0')
+            
+            if is_network_address or not db_ip.endswith('/32'):
+                # 尝试从配置文件中读取正确的IP
+                conf_path = os.path.join(CLIENT_OUTPUT_DIR, f"wg{name}.conf")
+                if os.path.exists(conf_path):
+                    try:
+                        with open(conf_path, 'r') as f:
+                            for line in f:
+                                if line.strip().startswith('Address'):
+                                    # 提取正确的 IP，格式应为 "Address = 10.0.0.5/32"
+                                    correct_ip = line.split('=')[1].strip()
+                                    if correct_ip and '/' in correct_ip:
+                                        # 验证IP地址格式
+                                        ip_part = correct_ip.split('/')[0]
+                                        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip_part):
+                                            # 更新数据库
+                                            c.execute('UPDATE clients SET ip = ? WHERE id = ?', (correct_ip, client_id))
+                                            fixed += 1
+                                            print(f"[FIXED] Client '{name}': {db_ip} -> {correct_ip}")
+                                    break
+                    except Exception as e:
+                        error_msg = f"Error reading config for {name}: {e}"
+                        print(f"[ERROR] {error_msg}")
+                        errors.append(error_msg)
+                else:
+                    error_msg = f"Config file not found for client {name}: {conf_path}"
+                    print(f"[WARN] {error_msg}")
+                    errors.append(error_msg)
+        
+        conn.commit()
+        print(f"[INFO] Fixed {fixed} corrupted client IP addresses")
+        if errors:
+            print(f"[INFO] Encountered {len(errors)} errors during fix:")
+            for error in errors:
+                print(f"  - {error}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to fix corrupted IPs: {e}")
+        import traceback
+        print(traceback.format_exc())
+    finally:
+        conn.close()
+    
+    return fixed
+
 def sanitize_name(name):
     """Remove special characters from client names"""
     # Only keep letters, numbers, underscores and hyphens
@@ -55,7 +127,8 @@ def extract_client_ip_from_allowed_ips(allowed_ips_str):
     
     Priority:
     1. /32 addresses (most likely to be client IPs)
-    2. First non-route address
+    2. Skip network addresses and routes
+    3. Return the first valid host IP
     """
     if not allowed_ips_str:
         return None
@@ -74,9 +147,19 @@ def extract_client_ip_from_allowed_ips(allowed_ips_str):
             if ip_cidr.endswith('/32'):
                 return ip_cidr.split('/')[0]  # Return IP without CIDR
             
-            # If no /32 found yet, use first valid IP as fallback
-            if not client_ip:
-                client_ip = ip_cidr.split('/')[0]
+            # Skip network addresses (addresses ending with .0 for /24, /16, /8 networks)
+            # and skip addresses with CIDR other than /32 as they are subnets, not client IPs
+            ip_only = ip_cidr.split('/')[0]
+            cidr = int(ip_cidr.split('/')[1])
+            
+            # Skip if it's a network address (e.g., 10.12.0.0 from 10.12.0.0/24)
+            # Network addresses typically end with .0 for /24 masks
+            if cidr < 32 and ip_only.endswith('.0'):
+                continue
+            
+            # If no /32 found yet, use first valid IP as fallback (non-network address)
+            if not client_ip and not ip_only.endswith('.0'):
+                client_ip = ip_only
     
     return client_ip
 
@@ -102,8 +185,10 @@ def populate_existing_clients():
                         existing = c.execute("SELECT COUNT(*) FROM clients WHERE public_key = ?", (pubkey,)).fetchone()[0]
                         if existing == 0:
                             name = f"user{i}"
+                            # 确保保存的IP使用/32格式
+                            client_ip_with_cidr = f"{client_ip}/32" if '/' not in client_ip else client_ip
                             c.execute('INSERT INTO clients (name, interface, ip, public_key, status) VALUES (?, ?, ?, ?, ?)',
-                                      (name, wg_if, client_ip, pubkey, 'active'))
+                                      (name, wg_if, client_ip_with_cidr, pubkey, 'active'))
                             i += 1
         except Exception as e:
             print(f"[WARN] Could not parse peers for {wg_if}: {e}")
@@ -130,9 +215,15 @@ def populate_existing_clients():
                             config_content = f.read()
                         
                         # Extract needed information from config
-                        # Get IP address
-                        ip_match = re.search(r'Address\s*=\s*([0-9\.]+)/\d+', config_content)
+                        # Get IP address with full CIDR notation
+                        ip_match = re.search(r'Address\s*=\s*([0-9\.]+/\d+)', config_content)
                         client_ip = ip_match.group(1) if ip_match else "unknown"
+                        
+                        # Fallback: if regex doesn't match with CIDR, try without
+                        if client_ip == "unknown":
+                            ip_match = re.search(r'Address\s*=\s*([0-9\.]+)', config_content)
+                            if ip_match:
+                                client_ip = f"{ip_match.group(1)}/32"
                         
                         # Get private key to derive public key
                         privkey_match = re.search(r'PrivateKey\s*=\s*([a-zA-Z0-9+/=]+)', config_content)
@@ -188,6 +279,19 @@ def populate_existing_clients():
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # for flashing messages and session
+
+def start_wireguard_interface(interface):
+    """Start a WireGuard interface using wg-quick"""
+    try:
+        # 先更新 resolvconf 数据库（修复 signature mismatch 错误）
+        subprocess.call(['resolvconf', '-u'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 再启动 WireGuard 接口
+        subprocess.check_call(['wg-quick', 'up', interface])
+        return True, "Interface started successfully"
+    except subprocess.CalledProcessError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
 
 def get_wg_interfaces():
     output = subprocess.check_output(["wg", "show", "interfaces"]).decode().strip()
@@ -258,6 +362,7 @@ def before_request_func():
     if not getattr(app, 'initialized', False):
         os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
         init_db()
+        fix_corrupted_client_ips_from_configs()  # 修复已存在的错误IP
         populate_existing_clients()
         app.initialized = True
         print("App initialization completed")
@@ -319,9 +424,9 @@ PrivateKey = # Please generate manually or use wg genkey
             filename = request.form.get('filename')
             if filename:
                 interface = filename.replace('.conf', '')
-                try:
-                    subprocess.check_call(['wg-quick', 'up', interface])
-                    flash(f'Interface {interface} started', 'success')
+                success, message = start_wireguard_interface(interface)
+                if success:
+                    flash(f'Interface {interface} started: {message}', 'success')
                     # 存储状态信息到会话
                     session['server_status'] = {
                         'interface': interface,
@@ -329,9 +434,8 @@ PrivateKey = # Please generate manually or use wg genkey
                         'status': 'success',
                         'timestamp': time.time()
                     }
-                except subprocess.CalledProcessError as e:
-                    error_output = str(e.output) if hasattr(e, 'output') else str(e)
-                    flash(f'Failed to start interface {interface}: {error_output}', 'danger')
+                else:
+                    flash(f'Failed to start interface {interface}: {message}', 'danger')
                     # 存储错误状态到会话
                     session['server_status'] = {
                         'interface': interface,
@@ -344,12 +448,12 @@ PrivateKey = # Please generate manually or use wg genkey
             filename = request.form.get('filename')
             if filename:
                 interface = filename.replace('.conf', '')
-                try:
-                    # 先停止接口
-                    subprocess.call(['wg-quick', 'down', interface])
-                    # 启动接口
-                    subprocess.check_call(['wg-quick', 'up', interface])
-                    flash(f'Interface {interface} restarted', 'success')
+                # 先停止接口
+                subprocess.call(['wg-quick', 'down', interface])
+                # 启动接口
+                success, message = start_wireguard_interface(interface)
+                if success:
+                    flash(f'Interface {interface} restarted: {message}', 'success')
                     # 存储状态信息到会话
                     session['server_status'] = {
                         'interface': interface,
@@ -357,9 +461,9 @@ PrivateKey = # Please generate manually or use wg genkey
                         'status': 'success',
                         'timestamp': time.time()
                     }
-                except subprocess.CalledProcessError as e:
-                    error_output = str(e.output) if hasattr(e, 'output') else str(e)
-                    flash(f'Failed to restart interface {interface}: {error_output}', 'danger')
+                else:
+                    flash(f'Failed to restart interface {interface}: {message}', 'danger')
+                    # 存储错误状态到会话
                     session['server_status'] = {
                         'interface': interface,
                         'message': f'Failed to restart {interface}',
@@ -538,7 +642,11 @@ PersistentKeepalive = 25
     # Get status of all peers on all interfaces
     all_peers_status = {}
     for interface in interfaces:
-        all_peers_status[interface] = get_all_peers_status(interface)
+        try:
+            all_peers_status[interface] = get_all_peers_status(interface)
+        except Exception as e:
+            print(f"[ERROR] Failed to get status for interface {interface}: {e}")
+            all_peers_status[interface] = {}  # Set empty dict as fallback
 
     clients_with_status = []
     for client in client_records:
@@ -551,6 +659,12 @@ PersistentKeepalive = 25
         print(f"\n=== Client: {name} ===")
         print(f"DB pubkey: '{pubkey}'")
         print(f"Interface: {interface}")
+        
+        # Defensive check: ensure interface exists in all_peers_status
+        if interface not in all_peers_status:
+            print(f"[WARN] Interface {interface} not found in all_peers_status, using empty dict")
+            all_peers_status[interface] = {}
+        
         print(f"WireGuard peers: {list(all_peers_status[interface].keys())}")
         if pubkey in all_peers_status[interface]:
             status = all_peers_status[interface][pubkey]
@@ -1279,22 +1393,30 @@ def allocate_client_ip(interface, last_octet=None):
     base_network = '.'.join(base_octets[:3])  # 例如 10.0.0
     
     # 获取已使用的 IP 地址
+    # 从数据库获取 IP
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    used_ips = []
+    db_used_ips = []
     try:
         for row in c.execute('SELECT ip FROM clients WHERE interface = ?', (interface,)):
             if row[0]:
                 ip = row[0]
                 if '/' in ip:
                     ip = ip.split('/')[0]  # 移除 CIDR 部分
-                used_ips.append(ip)
+                db_used_ips.append(ip)
     except Exception as e:
         print(f"查询数据库错误: {e}")
     finally:
         conn.close()
     
-    print(f"当前接口 {interface} 已使用 IP: {used_ips}")
+    # 从 WireGuard 获取 IP（真实来源）
+    wg_used_ips = get_existing_peer_ips(interface)
+    
+    # 合并两个来源的 IP
+    used_ips = list(set(db_used_ips + wg_used_ips))
+    
+    print(f"当前接口 {interface} 数据库已使用 IP: {db_used_ips}")
+    print(f"当前接口 {interface} WireGuard 已使用 IP: {wg_used_ips}")
     
     # 检查用户指定的 IP 是否可用
     if last_octet and last_octet.isdigit():

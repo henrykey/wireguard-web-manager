@@ -23,6 +23,8 @@ WireGuard Web Manager is a simple, lightweight web interface for managing WireGu
 - Universal private network address validation and correction
 - Priority display using real-time WireGuard data
 - Ability to run WireGuard service inside or outside the container
+- **Automatic IP corruption detection and repair** - Automatically fixes network address errors in database and config files
+- **Intelligent IP extraction** - Correctly identifies client IPs from allowed-ips even with multiple subnets
 
 ## Installation and Deployment
 
@@ -123,6 +125,25 @@ After installation, you can access the management interface via browser at http:
 - **Download Configuration**: Click "Download Config" to get the client configuration file
 - **Display QR Code**: Click "Show QR Code" to quickly configure using the WireGuard mobile app by scanning
 
+### Data Recovery and IP Repair
+
+The application includes an automatic IP corruption detection and repair system:
+
+- **Automatic Detection**: On startup, the application automatically scans the database for corrupted IP addresses (network addresses like 10.12.0.0 instead of client IPs)
+- **Automatic Repair**: Reads the correct IP from client configuration files (`/app/clients/wg*.conf`) and updates the database
+- **Manual Repair**: You can manually run the repair tool for inspection and detailed logging:
+  ```bash
+  python3 fix_ips.py
+  ```
+  This will show a detailed report of:
+  - Which clients have corrupted IPs
+  - What the correct IP should be
+  - Statistics on the repair process
+
+**Example of what gets repaired:**
+- Before: Database contains `10.12.0.0` (network address from allowed-ips `10.12.0.0/24`)
+- After: Database is corrected to `10.12.0.5/32` (actual client IP from config file)
+
 ## Parameter Description
 
 - `WIREGUARD_INTERNAL=true`: Enable internal WireGuard service in container
@@ -144,12 +165,22 @@ If you encounter issues, check the container logs:
 ```bash
 docker logs wgmanager
 ```
-Common issues:
 
-- WireGuard interface fails to start: Check if the container has sufficient privileges (--privileged)
-- Clients can't connect: Check firewall and port mapping settings
-- Sync status button doesn't work: Ensure the container has permissions to read/write WireGuard configurations
-- Interface configuration doesn't display: Check mounting and permissions of the /etc/wireguard directory
+### Common Issues and Solutions
+
+- **WireGuard interface fails to start**: Check if the container has sufficient privileges (--privileged)
+- **Clients can't connect**: Check firewall and port mapping settings
+- **Sync status button doesn't work**: Ensure the container has permissions to read/write WireGuard configurations
+- **Interface configuration doesn't display**: Check mounting and permissions of the /etc/wireguard directory
+
+### IP Address Issues
+
+- **Clients showing wrong IP (like 10.12.0.0)**: This is the corruption issue that has been fixed in v1.3.0. The repair system will automatically fix it on startup, or you can manually run `python3 fix_ips.py` to see detailed repair status
+- **After repair, clients still show old IP**: Restart the Flask application to reload the fixed data from the database:
+  ```bash
+  docker restart wgmanager
+  ```
+- **Config files have different IP than database**: Run the sync button in the web interface or use `python3 fix_ips.py` to identify and repair the discrepancy
 
 ## Contributions and Improvements
 
@@ -157,7 +188,15 @@ Feedback and improvement suggestions are welcome via Issues and Pull Requests.
 
 ## Version History
 
-### v1.2.1 (Latest)
+### v1.3.0 (Latest)
+- **Critical IP Corruption Fix**: Fixed major bug where network addresses (e.g., 10.12.0.0) were incorrectly used as client IPs
+- **Automatic IP Repair System**: Added `fix_corrupted_client_ips_from_configs()` function that automatically detects and repairs corrupted IPs on startup
+- **Enhanced IP Extraction**: Improved `extract_client_ip_from_allowed_ips()` to skip network addresses and only accept valid client IPs
+- **Consistent /32 Format**: Ensured all new and existing clients use /32 subnet masks
+- **Repair Tool**: Added standalone `fix_ips.py` script for manual inspection and repair with detailed reporting
+- **Database Integrity**: Auto-sync now correctly identifies and fixes IP format inconsistencies
+
+### v1.2.1
 - **Fixed IP extraction logic**: Resolved issues with multi-IP allowed-ips parsing
 - **Unified IP selection**: All components now use the same intelligent IP extraction function
 - **Priority-based selection**: Correctly prioritizes /32 addresses over network ranges

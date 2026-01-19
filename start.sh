@@ -18,11 +18,19 @@ fi
 if [ "$INTERNAL_MODE" = "true" ] && [ "$AUTO_START" = "true" ]; then
     echo "Starting WireGuard interfaces automatically..."
     
+    # 修复配置文件权限（wg-quick 需要 600）
+    if [ -d /etc/wireguard ]; then
+        chmod 600 /etc/wireguard/*.conf 2>/dev/null || true
+    fi
+    
     # 启动 WireGuard 接口（如果存在配置）
     for conf in /etc/wireguard/*.conf; do
         if [ -f "$conf" ]; then
             interface=$(basename "$conf" .conf)
             echo "Starting WireGuard interface: $interface"
+            # 先更新 resolvconf 数据库（修复 signature mismatch 错误）
+            resolvconf -u 2>/dev/null || true
+            # 再启动 WireGuard 接口
             wg-quick up "$interface" || echo "Failed to start $interface"
         fi
     done
