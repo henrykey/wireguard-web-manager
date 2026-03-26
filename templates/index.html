@@ -20,7 +20,15 @@
 </head>
 <body>
     <div class="container mt-4">
-        <h1>WireGuard Manager</h1>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h1>WireGuard Manager</h1>
+            {% if ENABLE_AUTH %}
+            <div>
+                <span class="text-muted me-3">Welcome, {{ session.get('username', 'User') }}</span>
+                <a href="{{ url_for('logout') }}" class="btn btn-outline-danger btn-sm">Logout</a>
+            </div>
+            {% endif %}
+        </div>
 
         <!-- Toggle Server Config Button -->
         <button class="btn btn-secondary mb-3" type="button" data-bs-toggle="collapse" data-bs-target="#serverConfigSection" aria-expanded="false" aria-controls="serverConfigSection">

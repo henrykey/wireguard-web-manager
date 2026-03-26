@@ -10,12 +10,35 @@ import qrcode
 from io import BytesIO
 import base64
 import time
+from functools import wraps
+import os.path
+from dotenv import load_dotenv
+import sys
+
+# Load environment variables
+load_dotenv()
+
+# Get authentication settings from .env
+ENABLE_AUTH = os.getenv('ENABLE_AUTH', 'no').lower() == 'yes'
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'password123')
+SECRET_KEY = os.getenv('SECRET_KEY', 'supersecretkey')
 
 DB_PATH = "/app/clients/clients.db"
 CLIENT_OUTPUT_DIR = "/app/clients"
 WG_CONF_DIR = "/etc/wireguard"
 
 os.makedirs(CLIENT_OUTPUT_DIR, exist_ok=True)
+
+def login_required(f):
+    """Decorator to require authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if ENABLE_AUTH and 'logged_in' not in session:
+            flash('Please login to access this page', 'error')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 def init_db():
     """Initialize the database and create necessary tables/columns"""
@@ -278,7 +301,14 @@ def populate_existing_clients():
     print("[INFO] Client population completed")
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # for flashing messages and session
+app.secret_key = SECRET_KEY  # for flashing messages and session
+
+# Add template context for auth status
+@app.context_processor
+def inject_auth():
+    return {
+        'ENABLE_AUTH': ENABLE_AUTH
+    }
 
 def start_wireguard_interface(interface):
     """Start a WireGuard interface using wg-quick"""
@@ -372,7 +402,30 @@ def gen_server_key():
     privkey = subprocess.check_output(["wg", "genkey"]).decode().strip()
     return {"private_key": privkey}
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+
+        if ENABLE_AUTH and username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username
+            flash('Login successful!', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid username or password', 'error')
+
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash('You have been logged out', 'info')
+    return redirect(url_for('login'))
+
 @app.route('/', methods=['GET', 'POST'])
+@login_required
 def index():
     # ----------- Server config section -----------
     server_configs = []
@@ -763,12 +816,14 @@ PersistentKeepalive = 25
     )
 
 @app.route('/download/<filename>')
+@login_required
 def download(filename):
     return send_file(os.path.join(CLIENT_OUTPUT_DIR, filename), as_attachment=True)
 
 
 # Delete client route
 @app.route('/delete/<name>', methods=['POST'])
+@login_required
 def delete_client(name):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -806,6 +861,7 @@ def delete_client(name):
     return redirect(url_for('index'))
 
 @app.route('/rename/<old_name>', methods=['POST'])
+@login_required
 def rename_client(old_name):
     new_name = request.form.get('new_name')
     if not new_name:
@@ -1008,6 +1064,7 @@ def parse_handshake_time(handshake_text):
         return 0
 
 @app.route('/toggle/<name>', methods=['POST'])
+@login_required
 def toggle_client(name):
     """Pause or resume client connection"""
     action = request.form.get('action', 'pause')
@@ -1055,6 +1112,7 @@ def toggle_client(name):
     return redirect(url_for('index'))
 
 @app.route('/qr/<name>')
+@login_required
 def show_qr(name):
     """Show client QR code"""
     conn = sqlite3.connect(DB_PATH)
@@ -1069,6 +1127,7 @@ def show_qr(name):
     return render_template('qr.html', name=name, qr_base64=client[0])
 
 @app.route('/sync', methods=['POST'])
+@login_required
 def sync_wg_clients():
     current_interface = request.form.get('current_interface')
     
